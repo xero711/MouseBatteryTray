@@ -26,7 +26,7 @@ Razer、SteelSeries、Pulsar、VAXEEの専用プロトコルは公開参照に�
 
 ## メモリ
 
-このRelease版を約25秒、250 ms間隔で測定したところ、Private Bytesは最大2.29 MBでした。初回HID列挙中だけ全体Working Setが一時的に11.29 MBまで上がり、起動3秒後以降は最大2.16 MBでした。実行ファイルは211 KiBです。全体Working SetはWindowsの共有コードページや起動状況で変わり、初回列挙中に10 MBを一時的に超える場合があります。
+このRelease版はWindowsにプロセス全体のWorking Setを9 MiB以下に保つハード上限を設定します。約25秒、100 ms間隔の測定では全体Working Setが最大8.99 MB、Private Bytesが最大2.29 MBでした。実行ファイルは211 KiBです。上限を設定できない場合は、従来の初期化後トリムにフォールバックします。
 
 ## ビルド
 

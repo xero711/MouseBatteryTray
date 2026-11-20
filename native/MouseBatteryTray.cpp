@@ -145,7 +145,7 @@ std::atomic<bool> g_stopRequested{ false };
 HANDLE g_stopEvent{};
 HANDLE g_mutex{};
 ULONGLONG g_shutdownDeadline = 0;
-bool g_workingSetTrimmed = false;
+bool g_workingSetLimitSet = false;
 int g_panelScrollOffset = 0;
 int g_panelVisibleRows = 5;
 int g_panelWheelRemainder = 0;
@@ -750,9 +750,20 @@ void ScanDevices() {
     }
 }
 
-void TrimWorkingSetOnce() {
-    if (g_workingSetTrimmed) return;
-    g_workingSetTrimmed = SetProcessWorkingSetSize(GetCurrentProcess(),
+bool ApplyWorkingSetLimit() {
+    SIZE_T minimumBytes = 0;
+    SIZE_T currentMaximumBytes = 0;
+    DWORD currentFlags = 0;
+    if (!GetProcessWorkingSetSizeEx(GetCurrentProcess(), &minimumBytes,
+        &currentMaximumBytes, &currentFlags)) return false;
+    constexpr SIZE_T maximumBytes = 9 * 1024 * 1024; // Leave margin under the 10 MiB process budget.
+    minimumBytes = std::min(minimumBytes, maximumBytes);
+    const DWORD flags = QUOTA_LIMITS_HARDWS_MAX_ENABLE | QUOTA_LIMITS_HARDWS_MIN_DISABLE;
+    return SetProcessWorkingSetSizeEx(GetCurrentProcess(), minimumBytes, maximumBytes, flags) != FALSE;
+}
+
+bool TrimWorkingSet() {
+    return SetProcessWorkingSetSize(GetCurrentProcess(),
         static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1)) != FALSE;
 }
 
@@ -1750,7 +1761,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         g_deviceNotify = RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
         SetTimer(hwnd, TIMER_BATTERY, 1000, nullptr);
         ScanDevices();
-        TrimWorkingSetOnce();
+        if (!g_workingSetLimitSet) TrimWorkingSet();
         return 0;
     }
     case WM_DEVICECHANGE:
@@ -1844,6 +1855,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    g_workingSetLimitSet = ApplyWorkingSetLimit();
     g_instance = instance;
     LoadSettings();
     SetLastError(ERROR_SUCCESS);
