@@ -93,6 +93,10 @@ struct MouseDevice {
     std::wstring errorPath;
     std::wstring steelSeriesPath;
     DWORD steelSeriesOutputLength = 0;
+    std::wstring pulsarPath;
+    DWORD pulsarOutputLength = 0;
+    std::wstring vaxeePath;
+    DWORD vaxeeFeatureLength = 0;
     std::vector<std::wstring> mousePaths;
     std::vector<std::wstring> bluetoothBatteryNodeIds;
     USHORT vendorId = 0;
@@ -231,6 +235,16 @@ bool IsKnownBatteryMouse(USHORT vid, USHORT pid) {
     if (vid == 0x046D && (pid == 0xC095 || pid == 0xC547)) return true;
     if (vid == 0x3554 && (pid == 0xF50F || pid == 0xF510)) return true;
     if (vid == 0x1038 && SteelSeriesMouseModel(pid)) return true;
+    if (vid == 0x3710 && (pid == 0x3414 || pid == 0x5406)) return true;
+    if (vid == 0x3057) {
+        switch (pid) {
+        case 0x0005: case 0x1001: case 0x1002: case 0x2001:
+        case 0x1003: case 0x1004: case 0x1005: case 0x1006: case 0x1007: case 0x1008:
+        case 0x1009: case 0x1010: case 0x1011: case 0x1012: case 0x1013:
+            return true;
+        default: return false;
+        }
+    }
     if (vid != 0x1532) return false;
     switch (pid) {
     case 0x001F: case 0x0024: case 0x0025: case 0x0032: case 0x003E: case 0x003F:
@@ -262,6 +276,8 @@ std::wstring KnownName(USHORT vid, USHORT pid) {
         const auto* model = SteelSeriesMouseModel(pid);
         return model ? model->name : L"";
     }
+    if (vid == 0x3710) return L"Pulsar X2 CrazyLight";
+    if (vid == 0x3057) return L"";
     if (vid != 0x1532) return L"";
     switch (pid) {
     case 0x001F: return L"Razer Naga Epic";
@@ -485,6 +501,14 @@ std::vector<MouseDevice> EnumerateMice() {
             && DeviceInterfaceNumber(detail->DevicePath) == steelSeriesModel->interfaceNumber
             && caps.UsagePage >= 0xFF00 && caps.OutputReportByteLength >= steelSeriesRequestLength
             && caps.InputReportByteLength >= steelSeriesMinimumReplyLength;
+        const bool pulsarBattery = status == HIDP_STATUS_SUCCESS && attributes.VendorID == 0x3710
+            && (attributes.ProductID == 0x3414 || attributes.ProductID == 0x5406)
+            && caps.UsagePage == 0xFF02 && caps.Usage == 0x0002
+            && caps.OutputReportByteLength >= 17
+            && caps.InputReportByteLength >= 17 && caps.InputReportByteLength <= 128;
+        const bool vaxeeBattery = status == HIDP_STATUS_SUCCESS && attributes.VendorID == 0x3057
+            && known && caps.UsagePage == 0xFF05 && caps.Usage == 0x0001 && caps.FeatureReportByteLength >= 64
+            && HasFeatureReportId(preparsed, caps, 0x0E);
         const bool logitechBattery = attributes.VendorID == 0x046D
             && caps.UsagePage == 0xFF00 && caps.Usage == 0x0002 && caps.OutputReportByteLength >= 20;
         if (logitechBattery) {
@@ -497,7 +521,7 @@ std::vector<MouseDevice> EnumerateMice() {
             && (attributes.ProductID == 0xF50F || attributes.ProductID == 0xF510)
             && caps.UsagePage == 0xFF02 && caps.Usage == 0x0002 && caps.OutputReportByteLength >= 17;
         const bool knownInterface = (attributes.VendorID == 0x1532 && known && razerFeature)
-            || lamzuBattery || steelSeriesBattery;
+            || lamzuBattery || steelSeriesBattery || pulsarBattery || vaxeeBattery;
 
         if (attributes.VendorID == 0x046D && IsLogitechReceiver(attributes.ProductID)
             && caps.UsagePage == 0xFF00 && caps.Usage == 0x0001 && caps.InputReportByteLength == 7) {
@@ -515,9 +539,18 @@ std::vector<MouseDevice> EnumerateMice() {
             mouse.key = containerId.empty() ? UsageIdentity(mouse.path) : containerId;
             mouse.mousePaths.push_back(mouse.path);
             mouse.razerFeature = razerFeature;
+            if (mouse.name.empty()) mouse.name = productName;
             if (steelSeriesBattery) {
                 mouse.steelSeriesPath = mouse.path;
                 mouse.steelSeriesOutputLength = caps.OutputReportByteLength;
+            }
+            if (pulsarBattery) {
+                mouse.pulsarPath = mouse.path;
+                mouse.pulsarOutputLength = caps.OutputReportByteLength;
+            }
+            if (vaxeeBattery) {
+                mouse.vaxeePath = mouse.path;
+                mouse.vaxeeFeatureLength = caps.FeatureReportByteLength;
             }
             if (razerFeature) {
                 mouse.razerUsagePage = caps.UsagePage;
@@ -550,6 +583,16 @@ std::vector<MouseDevice> EnumerateMice() {
                     && (duplicate->steelSeriesPath.empty() || mouse.steelSeriesPath < duplicate->steelSeriesPath)) {
                     duplicate->steelSeriesPath = mouse.steelSeriesPath;
                     duplicate->steelSeriesOutputLength = mouse.steelSeriesOutputLength;
+                }
+                if (!mouse.pulsarPath.empty()
+                    && (duplicate->pulsarPath.empty() || mouse.pulsarPath < duplicate->pulsarPath)) {
+                    duplicate->pulsarPath = mouse.pulsarPath;
+                    duplicate->pulsarOutputLength = mouse.pulsarOutputLength;
+                }
+                if (!mouse.vaxeePath.empty()
+                    && (duplicate->vaxeePath.empty() || mouse.vaxeePath < duplicate->vaxeePath)) {
+                    duplicate->vaxeePath = mouse.vaxeePath;
+                    duplicate->vaxeeFeatureLength = mouse.vaxeeFeatureLength;
                 }
                 if (attributes.VendorID == 0x1532 && razerFeature) {
                     duplicate->razerFeature = true;
@@ -612,9 +655,11 @@ std::vector<MouseDevice> EnumerateMice() {
     }
     std::sort(result.begin(), result.end(), [](const MouseDevice& a, const MouseDevice& b) {
         const bool aDedicated = IsKnownBatteryMouse(a.vendorId, a.productId)
-            || (a.vendorId == 0x046D && (!a.wiredPath.empty() || !a.receiverPath.empty()));
+            || (a.vendorId == 0x046D && (!a.wiredPath.empty() || !a.receiverPath.empty()))
+            || !a.pulsarPath.empty() || !a.vaxeePath.empty();
         const bool bDedicated = IsKnownBatteryMouse(b.vendorId, b.productId)
-            || (b.vendorId == 0x046D && (!b.wiredPath.empty() || !b.receiverPath.empty()));
+            || (b.vendorId == 0x046D && (!b.wiredPath.empty() || !b.receiverPath.empty()))
+            || !b.pulsarPath.empty() || !b.vaxeePath.empty();
         if (aDedicated != bDedicated) return aDedicated;
         if (a.name != b.name) return a.name < b.name;
         return a.key < b.key;
@@ -1161,6 +1206,90 @@ bool ReadLamzu(MouseDevice& mouse, BatteryResult& result) {
     return false;
 }
 
+bool ReadPulsar(MouseDevice& mouse, BatteryResult& result) {
+    if (mouse.pulsarPath.empty()) return false;
+    HidIo io(mouse.pulsarPath);
+    if (!io.IsOpen()) return false;
+    HidD_FlushQueue(io.NativeHandle());
+
+    BYTE request[17]{};
+    request[0] = 0x08;
+    request[1] = 0x04;
+    request[16] = CompxChecksum(request);
+    std::vector<BYTE> outputReport(std::max<DWORD>(mouse.pulsarOutputLength, static_cast<DWORD>(sizeof(request))));
+    std::copy(request, request + sizeof(request), outputReport.begin());
+
+    const ULONGLONG overallDeadline = GetTickCount64() + 1800;
+    BYTE response[128]{};
+    for (int attempt = 0; attempt < 2 && GetTickCount64() < overallDeadline; ++attempt) {
+        if (!io.Write(outputReport.data(), static_cast<DWORD>(outputReport.size()), 300)) continue;
+        const ULONGLONG attemptDeadline = std::min<ULONGLONG>(overallDeadline, GetTickCount64() + 850);
+        while (GetTickCount64() < attemptDeadline) {
+            const ULONGLONG now = GetTickCount64();
+            const DWORD timeout = static_cast<DWORD>(std::min<ULONGLONG>(80, attemptDeadline - now));
+            const int length = io.Read(response, sizeof(response), timeout);
+            if (length < 0) break;
+            if (length < 17 || response[0] != 0x08 || response[1] != 0x04 || response[6] > 100) continue;
+            result = { mouse.key, response[6], response[7] == 1 ? 1 : 0, L"connected" };
+            return true;
+        }
+    }
+    result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+    return false;
+}
+
+bool VaxeeFeatureQuery(HidIo& io, DWORD featureLength, BYTE command, std::vector<BYTE>& response) {
+    if (featureLength < 6 || g_stopRequested.load(std::memory_order_relaxed)) return false;
+    std::vector<BYTE> request(featureLength);
+    request[0] = 0x0E;
+    request[1] = 0xA5;
+    request[2] = command;
+    request[3] = 0x01;
+    request[4] = 0x01;
+    if (io.SetFeature(request.data(), static_cast<DWORD>(request.size()), 300) < 0) return false;
+    if (g_stopEvent) {
+        if (WaitForSingleObject(g_stopEvent, 100) == WAIT_OBJECT_0) return false;
+    } else {
+        Sleep(100);
+    }
+    if (g_stopRequested.load(std::memory_order_relaxed)) return false;
+    response.assign(featureLength, 0);
+    response[0] = 0x0E;
+    const int length = io.GetFeature(response.data(), static_cast<DWORD>(response.size()), 300);
+    if (length < 6 || response[0] != 0x0E || response[1] != 0xA5 || response[2] != command) return false;
+    // A receiver with no awake mouse can return the previous SET_FEATURE payload.
+    // Read replies use a different response frame; reject the request echoed as-is.
+    return response[3] != request[3] || response[4] != request[4] || response[5] != request[5];
+}
+
+bool ReadVaxee(MouseDevice& mouse, BatteryResult& result) {
+    if (mouse.vaxeePath.empty()) return false;
+    HidIo io(mouse.vaxeePath);
+    if (!io.IsOpen()) return false;
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<BYTE> battery;
+        if (!VaxeeFeatureQuery(io, mouse.vaxeeFeatureLength, 0x0B, battery)) {
+            if (g_stopRequested.load(std::memory_order_relaxed)) break;
+            if (g_stopEvent) {
+                if (WaitForSingleObject(g_stopEvent, 100) == WAIT_OBJECT_0) break;
+            } else {
+                Sleep(100);
+            }
+            continue;
+        }
+        if (battery[5] > 20) continue;
+        const int percent = battery[5] * 5;
+        std::vector<BYTE> chargingReply;
+        const int charging = VaxeeFeatureQuery(io, mouse.vaxeeFeatureLength, 0x10, chargingReply)
+            ? (chargingReply[5] != 0 ? 1 : 0) : -1;
+        result = { mouse.key, percent, charging, L"connected" };
+        return true;
+    }
+    result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+    return false;
+}
+
 bool ReadSteelSeries(MouseDevice& mouse, BatteryResult& result) {
     const auto* model = SteelSeriesMouseModel(mouse.productId);
     if (!model || mouse.steelSeriesPath.empty()) return false;
@@ -1315,6 +1444,8 @@ DWORD WINAPI BatteryWorker(void* parameter) {
         else if (mouse.vendorId == 0x046D && (!mouse.wiredPath.empty() || !mouse.receiverPath.empty())) readSuccess = ReadLogitech(mouse, result);
         else if (mouse.vendorId == 0x3554 && (mouse.productId == 0xF50F || mouse.productId == 0xF510)) readSuccess = ReadLamzu(mouse, result);
         else if (mouse.vendorId == 0x1038 && !mouse.steelSeriesPath.empty()) readSuccess = ReadSteelSeries(mouse, result);
+        else if (!mouse.pulsarPath.empty()) readSuccess = ReadPulsar(mouse, result);
+        else if (!mouse.vaxeePath.empty()) readSuccess = ReadVaxee(mouse, result);
         if (!readSuccess) readSuccess = ReadGenericBatteryFeature(mouse, result);
         if (!readSuccess) readSuccess = ReadWindowsBluetoothBattery(mouse, result);
         if (!readSuccess && result.percent >= 0 && result.state == L"unsupported") result.state = L"cached";
@@ -1340,6 +1471,8 @@ std::vector<std::wstring> PollingPaths(const MouseDevice& mouse) {
     add(mouse.receiverPath);
     add(mouse.errorPath);
     add(mouse.steelSeriesPath);
+    add(mouse.pulsarPath);
+    add(mouse.vaxeePath);
     for (const auto& path : mouse.razerInterfaces) add(path.path);
     for (const auto& endpoint : mouse.genericBatteryEndpoints) add(endpoint.path);
     return paths;

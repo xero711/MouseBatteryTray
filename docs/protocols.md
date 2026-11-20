@@ -29,6 +29,16 @@
 - Aerox/Prime系は出力レポート `92`（ケーブル）または `D2`（無線）を送り、Windowsが要求するHIDレポート長にゼロ埋めして送信します。入力レポート内のlevelと充電bitを読みます。Aerox 3 Wireless Gen 2はstatusと百分率を個別に確認します。Rival系は `AA 01` 要求を送り、妥当なlevelを含む応答を読みます。
 - モデル/PIDと応答形式の参照元は[BatteryTrayのSteelSeries provider](https://github.com/qu1ncky/BatteryTray/blob/main/src/providers/steelseries.rs)と[rivalcfg](https://github.com/flozz/rivalcfg)です。SteelSeriesマウスがこの開発PCにないため実機検証は未完了です。MITライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
+## Pulsar mice
+
+- Pulsar X2 CrazyLightの有線 `3710:3414` と8K receiver `3710:5406` に限定し、`FF02:0002` collectionを使います。17-byte battery command `08 04` をchecksum付きで送り、応答command、0〜100の残量、charging byteを確認します。出力HID reportが17 byteより長い場合はWindowsのreport長に合わせてゼロ埋めします。
+- Report formatは [mousebatt](https://github.com/ryanlewis/mousebatt/blob/main/src/protocol.rs)、対応PIDと両接続での実機応答は[HaloBatteryのデバイス報告](https://github.com/HeyOkay/HaloBattery/issues/164)を参照しました。このPCにPulsar実機はないためアプリからの実機検証は未完了です。MITライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
+
+## VAXEE mice
+
+- VID `3057` のうち、既知のVAXEE receiver PID (`0005`, `1001`, `1002`, `2001`) とmouse PID (`1003`〜`1013`) の `FF05:0001` collectionを対象にします。Feature report ID `0E` で battery command `0B` と charging command `10` を照会し、各応答がcommandをechoした場合だけ採用します。取得は読み取り専用で、polling rateなどの設定は変更しません。Batteryの1 stepを5%として表示します。
+- Report formatは [mousebatt](https://github.com/ryanlewis/mousebatt/blob/main/src/protocol.rs)、PID一覧は[mouse-battery-monitorのVAXEE資料](https://github.com/stuffz/mouse-battery-monitor/blob/main/docs/VAXEE.md)を参照しました。VAXEEマウスがこの開発PCにないため実機検証は未完了です。参照実装のMITライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
+
 ## Razer wireless mice
 
 - Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) は専用経路に含めていません。Orochi V2 Bluetooth (`0095`) はRazer専用経路と、WindowsがPnPプロパティに残量を公開し、HIDマウスと同じContainer IDで関連付けできる場合のBluetooth経路を試します。
