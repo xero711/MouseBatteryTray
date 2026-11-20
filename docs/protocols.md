@@ -10,13 +10,12 @@
 - 同時表示数は1〜16台から選択できます。WindowsのHID Container IDで同じ物理機器の複数コレクションをまとめ、同型番の別マウスは別項目にします。Container IDが取得できない機器はHIDパスで識別します。
 - 日本語/英語、表示数は `%LOCALAPPDATA%\MouseBatteryTray\settings.ini` に保存します。Windows起動時の開始設定は現在ユーザーの `Run` レジストリキーを使います。
 
-## Logitech G502 X PLUS
+## Logitech HID++ 2.0 mice
 
-- 対象: USB `046D:C095` と LIGHTSPEED レシーバー `046D:C547`。
-- HID++ 2.0。usage page `FF00` の長い `0002` レポートコレクションに要求し、有線はdevice index `FF`、レシーバーはslot 1〜6を確認します。レシーバーslotのエラー確認にだけ短い `FF00:0001` コレクションを開きます。
-- Unified Battery `0x1004` を優先し、百分率対応フラグが無い場合は Battery Status `0x1000` を試します。0%を不明値として扱うかどうかは使用するfeatureに従います。
+- Logitech mouse として検出した `046D` HID++ 2.0 interface (`FF00:0002`, 20-byte output report) を対象にします。有線はdevice index `FF`、製品ID `C500`〜`C5FF` のレシーバーはslot 1〜6を確認します。レシーバーではHID++ DeviceName featureのdevice typeを調べ、マウス種別のslotだけを残量問い合わせ対象にします。レシーバーslotのエラー確認にだけ短い `FF00:0001` コレクションを使います。
+- Unified Battery `0x1004` を優先し、 Battery Status `0x1000`、その後に Battery Voltage `0x1001` を試します。電圧は3500〜4500mVの単セルLi-ion範囲だけSolaarの放電カーブで百分率換算します。AA/AAAや複数セルを誤換算しないよう範囲外は採用しません。
 - HID++の有効な応答経路をキャッシュして、次回以降の問い合わせを短縮します。
-- 1台のレシーバー内で複数slotが応答する場合、現状は最初のバッテリー応答slotだけを表示します。
+- G502 X PLUS以外のLogitech機種はこのPCで未検証です。1台のレシーバー内で複数slotが応答する場合、現状は最初のバッテリー応答slotだけを表示します。HID++ 1.0のみの機種は対象外です。
 
 ## LAMZU Maya
 
@@ -24,13 +23,19 @@
 - usage page/usage `FF02:0002` のコレクションにCompx report-8のバッテリーコマンド `08 04` を送ります。17 byte応答のヘッダー、チェックサム、残量(0〜100)を確認します。
 - `3554:F510` は開発PCで確認した4KレシーバーのIDです。製品内部のマウスモデルまではレシーバーIDのみで特定しません。
 
+## SteelSeries wireless mice
+
+- VID `1038` の実装済み24 PIDを対象にします。Aerox 3/5/9、Prime/Prime Mini、Rival 3 Wireless/Gen 2、Rival 650 のケーブルまたは2.4GHzレシーバー接続です。モデルごとに指定されたHID interfaceだけを使います。
+- Aerox/Prime系は出力レポート `92`（ケーブル）または `D2`（無線）を送り、Windowsが要求するHIDレポート長にゼロ埋めして送信します。入力レポート内のlevelと充電bitを読みます。Aerox 3 Wireless Gen 2はstatusと百分率を個別に確認します。Rival系は `AA 01` 要求を送り、妥当なlevelを含む応答を読みます。
+- モデル/PIDと応答形式の参照元は[BatteryTrayのSteelSeries provider](https://github.com/qu1ncky/BatteryTray/blob/main/src/providers/steelseries.rs)と[rivalcfg](https://github.com/flozz/rivalcfg)です。SteelSeriesマウスがこの開発PCにないため実機検証は未完了です。MITライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
+
 ## Razer wireless mice
 
-- Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めていません。Bluetooth接続時は、WindowsがPnPプロパティに残量を公開し、HIDマウスと同じContainer IDで関連付けできる場合に限って表示します。
+- Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) は専用経路に含めていません。Orochi V2 Bluetooth (`0095`) はRazer専用経路と、WindowsがPnPプロパティに残量を公開し、HIDマウスと同じContainer IDで関連付けできる場合のBluetooth経路を試します。
 - Windowsのreport-ID byteを含む91 byte Feature reportを使います。残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求に一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
-- PIDごとの優先transaction IDに加え、代替値を試します。バッテリーを正常に読めたtransaction IDは次回以降に再利用します。読めたことのないIDはスリープ応答だけでは確定せず、誤ったIDを固定しないようにします。
+- PIDごとの優先transaction IDと応答待ちに加え、代替値を試します。バッテリーを正常に読めたtransaction IDは次回以降に再利用します。読めたことのないIDはスリープ応答だけでは確定せず、誤ったIDを固定しないようにします。AtherisとOrochi V2はモデル固有の長い初回応答待ちを使います。
 - 代替transaction IDを探すアプリ側の応答期限は1台あたり約1.5秒です。ドライバーがキャンセルに応答しないと実際の処理が延びることがあります。不応答のFeature要求はその機器の別経路へ進み、他の機器の更新は止めません。
-- PIDとtransaction IDの参照元は [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、対応モデルの確認には[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)を使いました。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
+- PIDとtransaction IDの参照元は [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、追加したPIDとモデル別の応答待ちは[BatteryTrayのRazer provider](https://github.com/qu1ncky/BatteryTray/blob/main/src/providers/razer_peripheral.rs)、対応モデルの確認には[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)を使いました。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
 ## 標準HID Battery Strength
 

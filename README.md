@@ -12,19 +12,20 @@ Windows の通知領域で、接続中の HID マウスを一覧表示し、対�
 
 ## バッテリー対応範囲
 
-- Logitech G502 X PLUS の USB と LIGHTSPEED HID++ 接続
+- Logitech HID++ 2.0対応マウス（G502 X PLUSで確認。他の検出対象モデルはプロトコル上の対応で実機未確認）
 - LAMZU Maya の USB とレシーバー接続
-- Razer の実装済み wireless PID 群（Naga、Mamba、Lancehead、Atheris、Pro Click、Viper、DeathAdder、Basilisk、Cobra Pro など）
+- SteelSeries Aerox 3/5/9、Prime/Prime Mini、Rival 3 Wireless/Gen 2、Rival 650 の実装済みPID群
+- Razer の wireless PID 群（Naga、Mamba、Lancehead、Atheris、Orochi V2、Pro Click、Viper、DeathAdder、Basilisk、Cobra など）
 - マウスのHID Feature reportに標準 Generic Device Controls / Battery Strength usage (`0x06:0x20`) がある機器
 - WindowsがBluetoothの電池残量を公開し、マウスと同じContainer IDに関連付けられる機器
 
 一般的な HID マウスも一覧に検出しますが、メーカー独自のバッテリー方式だけを持つ機器では残量を取得できません。Bluetooth機器は、Windowsが電池残量を公開するか、HIDとして公開して上記の読み取り方式に対応する場合に限ります。すべてのマウスから残量を共通方式で取得できる規格はありません。マウス入力レポートだけから残量を推測することもありません。
 
-Razer の各プロトコルはソース参照に基づいて実装していますが、このPCにはRazerマウスがなく実機確認は未完了です。Windowsが電池を公開しないBluetooth GATT専用機器や、未実装メーカー独自方式には対応できません。Logitech の1台のレシーバーに複数マウスがペアリングされている場合、現在はレシーバー内で応答した最初のスロットを表示します。USB接続とレシーバー接続の両方が個別に見える機種では、同じ物理マウスが2台として表示されることがあります。
+RazerとSteelSeriesの専用プロトコルはソース参照に基づいて実装していますが、このPCには該当するマウスがなく実機確認は未完了です。Windowsが電池を公開しないBluetooth GATT専用機器や、未実装メーカー独自方式には対応できません。Logitech の1台のレシーバーに複数マウスがペアリングされている場合、現在はレシーバー内で応答した最初のスロットを表示します。USB接続とレシーバー接続の両方が個別に見える機種では、同じ物理マウスが2台として表示されることがあります。
 
 ## メモリ
 
-Release版をこのPCで約25秒起動して測定した値は、Working Set 2.05〜2.16 MB、Private Bytes 2.16〜2.22 MBでした。起動時のHID列挙後に一度だけWorking Setを解放しています。Windowsは後で必要なコードページを再び読み込むため、負荷やOSの計測方法によって値は変わり、この短時間の測定は最大値の保証ではありません。実行ファイルは198 KiBです。
+この変更を含むRelease版をこのPCで約25秒起動して測定したピーク値は、Working Set 2.23 MB、Private Bytes 2.31 MBでした。起動時のHID列挙後に一度だけWorking Setを解放しています。Windowsは後で必要なコードページを再び読み込むため、負荷やOSの計測方法によって値は変わり、この短時間の測定は最大値の保証ではありません。実行ファイルは206 KiBです。
 
 ## ビルド
 

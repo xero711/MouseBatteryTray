@@ -66,10 +66,22 @@ struct GenericBatteryCandidate {
     USHORT productId = 0;
     GenericBatteryEndpoint endpoint;
 };
+struct LogitechBatteryCandidate {
+    std::wstring identity;
+    USHORT productId = 0;
+    std::wstring path;
+};
 struct RazerInterface {
     std::wstring path;
     USAGE usagePage = 0;
     USAGE usage = 0;
+};
+enum class SteelSeriesProtocol { Aerox, AeroxGen2, Rival };
+struct SteelSeriesModel {
+    const wchar_t* name;
+    int interfaceNumber;
+    SteelSeriesProtocol protocol;
+    bool wireless;
 };
 struct MouseDevice {
     std::wstring key;
@@ -79,6 +91,8 @@ struct MouseDevice {
     std::wstring wiredPath;
     std::wstring receiverPath;
     std::wstring errorPath;
+    std::wstring steelSeriesPath;
+    DWORD steelSeriesOutputLength = 0;
     std::vector<std::wstring> mousePaths;
     std::vector<std::wstring> bluetoothBatteryNodeIds;
     USHORT vendorId = 0;
@@ -175,29 +189,79 @@ bool LooksLikeKeyboard(const std::wstring& name) {
         || Contains(name, L"blackwidow") || Contains(name, L"cynosa") || Contains(name, L"ornata");
 }
 
+const SteelSeriesModel* SteelSeriesMouseModel(USHORT pid) {
+    static constexpr SteelSeriesModel aerox3{ L"SteelSeries Aerox 3 Wireless", 3, SteelSeriesProtocol::Aerox, true };
+    static constexpr SteelSeriesModel aerox3Wired{ L"SteelSeries Aerox 3 Wireless", 3, SteelSeriesProtocol::Aerox, false };
+    static constexpr SteelSeriesModel aerox3Gen2{ L"SteelSeries Aerox 3 Wireless Gen 2", 3, SteelSeriesProtocol::AeroxGen2, true };
+    static constexpr SteelSeriesModel aerox3Gen2Wired{ L"SteelSeries Aerox 3 Wireless Gen 2", 3, SteelSeriesProtocol::AeroxGen2, false };
+    static constexpr SteelSeriesModel aerox5{ L"SteelSeries Aerox 5 Wireless", 3, SteelSeriesProtocol::Aerox, true };
+    static constexpr SteelSeriesModel aerox5Wired{ L"SteelSeries Aerox 5 Wireless", 3, SteelSeriesProtocol::Aerox, false };
+    static constexpr SteelSeriesModel aerox9{ L"SteelSeries Aerox 9 Wireless", 3, SteelSeriesProtocol::Aerox, true };
+    static constexpr SteelSeriesModel aerox9Wired{ L"SteelSeries Aerox 9 Wireless", 3, SteelSeriesProtocol::Aerox, false };
+    static constexpr SteelSeriesModel prime{ L"SteelSeries Prime Wireless", 3, SteelSeriesProtocol::Aerox, true };
+    static constexpr SteelSeriesModel primeWired{ L"SteelSeries Prime Wireless", 3, SteelSeriesProtocol::Aerox, false };
+    static constexpr SteelSeriesModel primeMini{ L"SteelSeries Prime Mini Wireless", 3, SteelSeriesProtocol::Aerox, true };
+    static constexpr SteelSeriesModel primeMiniWired{ L"SteelSeries Prime Mini Wireless", 3, SteelSeriesProtocol::Aerox, false };
+    static constexpr SteelSeriesModel rival3{ L"SteelSeries Rival 3 Wireless", 3, SteelSeriesProtocol::Rival, true };
+    static constexpr SteelSeriesModel rival3Gen2{ L"SteelSeries Rival 3 Wireless Gen 2", 3, SteelSeriesProtocol::Rival, true };
+    static constexpr SteelSeriesModel rival650{ L"SteelSeries Rival 650 Wireless", 0, SteelSeriesProtocol::Rival, true };
+    static constexpr SteelSeriesModel rival650Wired{ L"SteelSeries Rival 650 Wireless", 0, SteelSeriesProtocol::Rival, false };
+    switch (pid) {
+    case 0x1838: case 0x1878: return &aerox3;
+    case 0x183A: case 0x187A: return &aerox3Wired;
+    case 0x1890: return &aerox3Gen2;
+    case 0x1892: return &aerox3Gen2Wired;
+    case 0x1852: case 0x185C: case 0x1860: return &aerox5;
+    case 0x1854: case 0x185E: case 0x1862: return &aerox5Wired;
+    case 0x1858: case 0x1874: return &aerox9;
+    case 0x185A: case 0x1876: return &aerox9Wired;
+    case 0x1840: return &prime;
+    case 0x1842: return &primeWired;
+    case 0x1848: return &primeMini;
+    case 0x184A: return &primeMiniWired;
+    case 0x1830: return &rival3;
+    case 0x1872: return &rival3Gen2;
+    case 0x1726: return &rival650;
+    case 0x172B: return &rival650Wired;
+    default: return nullptr;
+    }
+}
+
 bool IsKnownBatteryMouse(USHORT vid, USHORT pid) {
     if (vid == 0x046D && (pid == 0xC095 || pid == 0xC547)) return true;
     if (vid == 0x3554 && (pid == 0xF50F || pid == 0xF510)) return true;
+    if (vid == 0x1038 && SteelSeriesMouseModel(pid)) return true;
     if (vid != 0x1532) return false;
     switch (pid) {
     case 0x001F: case 0x0024: case 0x0025: case 0x0032: case 0x003E: case 0x003F:
     case 0x0044: case 0x0045: case 0x0059: case 0x005A: case 0x0062: case 0x006F: case 0x0070:
     case 0x0072: case 0x0073: case 0x0077: case 0x0080: case 0x007A: case 0x007B: case 0x007C:
-    case 0x007D: case 0x0083: case 0x0086: case 0x0088: case 0x008F: case 0x0090: case 0x0094:
+    case 0x007D: case 0x0083: case 0x0086: case 0x0088: case 0x008F: case 0x0090: case 0x0094: case 0x0095:
     case 0x009A: case 0x009C: case 0x009E: case 0x009F: case 0x00A5: case 0x00A6: case 0x00A7:
     case 0x00A8: case 0x00AA: case 0x00AB: case 0x00AF: case 0x00B0: case 0x00B3: case 0x00B4:
     case 0x00B6: case 0x00B7: case 0x00B8: case 0x00B9: case 0x00BE: case 0x00BF: case 0x00C0:
     case 0x00C1: case 0x00C2: case 0x00C3: case 0x00C4: case 0x00C5: case 0x00C7: case 0x00C8:
     case 0x00CC: case 0x00CD: case 0x00D0: case 0x00D1: case 0x00D3: case 0x00D4: case 0x00D6:
-    case 0x00D7: case 0x00DE: case 0x00DF: case 0x00E5: case 0x00E6:
+    case 0x00D7: case 0x00DA: case 0x00DB: case 0x00DE: case 0x00DF: case 0x00E5: case 0x00E6:
         return true;
     default: return false;
     }
 }
 
+bool IsLogitechReceiver(USHORT pid) {
+    return pid >= 0xC500 && pid <= 0xC5FF;
+}
+
 std::wstring KnownName(USHORT vid, USHORT pid) {
-    if (vid == 0x046D) return L"Logitech G502 X PLUS";
+    if (vid == 0x046D) {
+        if (pid == 0xC095 || pid == 0xC547) return L"Logitech G502 X";
+        return L"";
+    }
     if (vid == 0x3554) return L"LAMZU Maya";
+    if (vid == 0x1038) {
+        const auto* model = SteelSeriesMouseModel(pid);
+        return model ? model->name : L"";
+    }
     if (vid != 0x1532) return L"";
     switch (pid) {
     case 0x001F: return L"Razer Naga Epic";
@@ -215,7 +279,7 @@ std::wstring KnownName(USHORT vid, USHORT pid) {
     case 0x0083: return L"Razer Basilisk X HyperSpeed";
     case 0x0086: case 0x0088: return L"Razer Basilisk Ultimate";
     case 0x008F: case 0x0090: return L"Razer Naga Pro";
-    case 0x0094: return L"Razer Orochi V2";
+    case 0x0094: case 0x0095: return L"Razer Orochi V2";
     case 0x009A: return L"Razer Pro Click Mini";
     case 0x009C: return L"Razer DeathAdder V2 X HyperSpeed";
     case 0x009E: case 0x009F: return L"Razer Viper Mini SE";
@@ -236,6 +300,7 @@ std::wstring KnownName(USHORT vid, USHORT pid) {
     case 0x00D0: case 0x00D1: return L"Razer Pro Click V2";
     case 0x00D3: case 0x00D4: return L"Razer Basilisk Mobile";
     case 0x00D6: case 0x00D7: return L"Razer Basilisk V3 Pro 35K Phantom Green";
+    case 0x00DA: case 0x00DB: return L"Razer Cobra HyperSpeed";
     case 0x00DE: case 0x00DF: return L"Razer Viper V3 Pro SE";
     case 0x00E5: case 0x00E6: return L"Razer Viper V4 Pro";
     default: return L"Razer wireless mouse";
@@ -256,6 +321,20 @@ std::wstring UsageIdentity(const std::wstring& path) {
         identity.erase(pos, after - pos);
     }
     return identity;
+}
+
+int DeviceInterfaceNumber(const std::wstring& path) {
+    const auto normalized = Lower(path);
+    const auto marker = normalized.find(L"&mi_");
+    if (marker == std::wstring::npos) return 0;
+    const size_t digits = marker + 4;
+    if (digits + 2 > normalized.size() || !iswxdigit(normalized[digits]) || !iswxdigit(normalized[digits + 1])) return -1;
+    auto hexValue = [](wchar_t c) -> int {
+        if (c >= L'0' && c <= L'9') return c - L'0';
+        if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+        return c - L'A' + 10;
+    };
+    return hexValue(normalized[digits]) * 16 + hexValue(normalized[digits + 1]);
 }
 
 bool IsNullContainerId(const std::wstring& containerId) {
@@ -347,6 +426,7 @@ bool HasFeatureReportId(PHIDP_PREPARSED_DATA preparsed, const HIDP_CAPS& caps, B
 std::vector<MouseDevice> EnumerateMice() {
     std::vector<MouseDevice> result;
     std::vector<std::pair<std::wstring, std::wstring>> logitechShortPaths;
+    std::vector<LogitechBatteryCandidate> logitechBatteryCandidates;
     std::vector<GenericBatteryCandidate> genericBatteryCandidates;
     std::vector<std::wstring> keyboardContainers;
     HDEVINFO set = SetupDiGetClassDevsW(&kHidInterfaceGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -398,16 +478,28 @@ std::vector<MouseDevice> EnumerateMice() {
         const bool razerUsage = caps.UsagePage == 0x0001 || caps.UsagePage == 0xFF00;
         const bool razerFeature = attributes.VendorID == 0x1532 && known && razerUsage
             && caps.FeatureReportByteLength >= 91 && HasFeatureReportId(preparsed, caps, 0);
+        const auto* steelSeriesModel = attributes.VendorID == 0x1038 ? SteelSeriesMouseModel(attributes.ProductID) : nullptr;
+        const DWORD steelSeriesRequestLength = steelSeriesModel && steelSeriesModel->protocol == SteelSeriesProtocol::Rival ? 3 : 2;
+        const DWORD steelSeriesMinimumReplyLength = steelSeriesModel && steelSeriesModel->protocol != SteelSeriesProtocol::Aerox ? 4 : 3;
+        const bool steelSeriesBattery = status == HIDP_STATUS_SUCCESS && steelSeriesModel
+            && DeviceInterfaceNumber(detail->DevicePath) == steelSeriesModel->interfaceNumber
+            && caps.UsagePage >= 0xFF00 && caps.OutputReportByteLength >= steelSeriesRequestLength
+            && caps.InputReportByteLength >= steelSeriesMinimumReplyLength;
         const bool logitechBattery = attributes.VendorID == 0x046D
-            && (attributes.ProductID == 0xC095 || attributes.ProductID == 0xC547)
             && caps.UsagePage == 0xFF00 && caps.Usage == 0x0002 && caps.OutputReportByteLength >= 20;
+        if (logitechBattery) {
+            logitechBatteryCandidates.push_back({
+                containerId.empty() ? UsageIdentity(detail->DevicePath) : containerId,
+                attributes.ProductID, detail->DevicePath
+            });
+        }
         const bool lamzuBattery = attributes.VendorID == 0x3554
             && (attributes.ProductID == 0xF50F || attributes.ProductID == 0xF510)
             && caps.UsagePage == 0xFF02 && caps.Usage == 0x0002 && caps.OutputReportByteLength >= 17;
         const bool knownInterface = (attributes.VendorID == 0x1532 && known && razerFeature)
-            || logitechBattery || lamzuBattery;
+            || lamzuBattery || steelSeriesBattery;
 
-        if (attributes.VendorID == 0x046D && attributes.ProductID == 0xC547
+        if (attributes.VendorID == 0x046D && IsLogitechReceiver(attributes.ProductID)
             && caps.UsagePage == 0xFF00 && caps.Usage == 0x0001 && caps.InputReportByteLength == 7) {
             logitechShortPaths.emplace_back(containerId.empty() ? UsageIdentity(detail->DevicePath) : containerId,
                 detail->DevicePath);
@@ -423,19 +515,19 @@ std::vector<MouseDevice> EnumerateMice() {
             mouse.key = containerId.empty() ? UsageIdentity(mouse.path) : containerId;
             mouse.mousePaths.push_back(mouse.path);
             mouse.razerFeature = razerFeature;
+            if (steelSeriesBattery) {
+                mouse.steelSeriesPath = mouse.path;
+                mouse.steelSeriesOutputLength = caps.OutputReportByteLength;
+            }
             if (razerFeature) {
                 mouse.razerUsagePage = caps.UsagePage;
                 mouse.razerUsage = caps.Usage;
                 mouse.razerInterfaces.push_back({ mouse.path, caps.UsagePage, caps.Usage });
             }
-            if (attributes.VendorID == 0x046D && (attributes.ProductID == 0xC095 || attributes.ProductID == 0xC547)) {
-                if (attributes.ProductID == 0xC095) {
-                    mouse.name = L"G502 X (USB)";
-                    if (logitechBattery) mouse.wiredPath = mouse.path;
-                } else {
-                    mouse.name = L"G502 X (LIGHTSPEED)";
-                    if (logitechBattery) mouse.receiverPath = mouse.path;
-                }
+            if (attributes.VendorID == 0x046D && attributes.ProductID == 0xC095) {
+                mouse.name = L"G502 X (USB)";
+            } else if (attributes.VendorID == 0x046D && attributes.ProductID == 0xC547) {
+                mouse.name = L"G502 X (LIGHTSPEED)";
             } else if (attributes.VendorID == 0x3554 && (attributes.ProductID == 0xF50F || attributes.ProductID == 0xF510)) {
                 if (attributes.ProductID == 0xF50F) {
                     mouse.name = L"LAMZU Maya (USB)";
@@ -454,6 +546,11 @@ std::vector<MouseDevice> EnumerateMice() {
                 }
                 if (!mouse.wiredPath.empty()) duplicate->wiredPath = mouse.wiredPath;
                 if (!mouse.receiverPath.empty()) duplicate->receiverPath = mouse.receiverPath;
+                if (!mouse.steelSeriesPath.empty()
+                    && (duplicate->steelSeriesPath.empty() || mouse.steelSeriesPath < duplicate->steelSeriesPath)) {
+                    duplicate->steelSeriesPath = mouse.steelSeriesPath;
+                    duplicate->steelSeriesOutputLength = mouse.steelSeriesOutputLength;
+                }
                 if (attributes.VendorID == 0x1532 && razerFeature) {
                     duplicate->razerFeature = true;
                     if (std::find_if(duplicate->razerInterfaces.begin(), duplicate->razerInterfaces.end(), [&](const RazerInterface& item) {
@@ -475,6 +572,19 @@ std::vector<MouseDevice> EnumerateMice() {
         CloseHandle(handle);
     }
     SetupDiDestroyDeviceInfoList(set);
+    for (const auto& candidate : logitechBatteryCandidates) {
+        const auto mouse = std::find_if(result.begin(), result.end(), [&](const MouseDevice& item) {
+            const auto identity = item.containerId.empty() ? item.key : item.containerId;
+            return item.vendorId == 0x046D && item.productId == candidate.productId && identity == candidate.identity;
+        });
+        if (mouse == result.end()) continue;
+        auto& path = IsLogitechReceiver(candidate.productId) ? mouse->receiverPath : mouse->wiredPath;
+        if (path.empty()) path = candidate.path;
+    }
+    for (auto& mouse : result) {
+        if (mouse.vendorId == 0x046D && !mouse.receiverPath.empty()
+            && Contains(mouse.name, L"receiver")) mouse.name = L"Logitech HID++ mouse";
+    }
     for (auto& mouse : result) {
         const auto identity = mouse.containerId.empty() ? mouse.key : mouse.containerId;
         const bool containerHasKeyboard = !mouse.containerId.empty()
@@ -493,7 +603,7 @@ std::vector<MouseDevice> EnumerateMice() {
         }
     }
     for (auto& mouse : result) {
-        if (mouse.vendorId != 0x046D || mouse.productId != 0xC547) continue;
+        if (mouse.vendorId != 0x046D || !IsLogitechReceiver(mouse.productId)) continue;
         const auto identity = mouse.containerId.empty() ? mouse.key : mouse.containerId;
         const auto shortPath = std::find_if(logitechShortPaths.begin(), logitechShortPaths.end(), [&](const auto& path) {
             return path.first == identity;
@@ -501,8 +611,10 @@ std::vector<MouseDevice> EnumerateMice() {
         if (shortPath != logitechShortPaths.end()) mouse.errorPath = shortPath->second;
     }
     std::sort(result.begin(), result.end(), [](const MouseDevice& a, const MouseDevice& b) {
-        const bool aDedicated = IsKnownBatteryMouse(a.vendorId, a.productId);
-        const bool bDedicated = IsKnownBatteryMouse(b.vendorId, b.productId);
+        const bool aDedicated = IsKnownBatteryMouse(a.vendorId, a.productId)
+            || (a.vendorId == 0x046D && (!a.wiredPath.empty() || !a.receiverPath.empty()));
+        const bool bDedicated = IsKnownBatteryMouse(b.vendorId, b.productId)
+            || (b.vendorId == 0x046D && (!b.wiredPath.empty() || !b.receiverPath.empty()));
         if (aDedicated != bDedicated) return aDedicated;
         if (a.name != b.name) return a.name < b.name;
         return a.key < b.key;
@@ -514,6 +626,7 @@ std::vector<MouseDevice> EnumerateMice() {
 
 std::wstring BatteryDisplay(const MouseDevice& mouse, bool menuLabel = false) {
     if (mouse.percent < 0) {
+        if (mouse.state == L"unknown") return Text(L"残量不明", L"Battery level unknown");
         return mouse.state == L"sleeping"
             ? Text(L"スリープ中", L"Sleeping")
             : menuLabel ? Text(L"残量未取得", L"No battery reading")
@@ -530,7 +643,7 @@ std::wstring MouseSummary() {
     if (g_mice.empty()) return Text(L"マウス未検出", L"No mice detected");
     if (g_mice.size() == 1) {
         const auto& mouse = g_mice.front();
-        return mouse.name + (mouse.percent >= 0 ? L" " + BatteryDisplay(mouse) : L"");
+        return mouse.name + (mouse.percent >= 0 || mouse.state == L"unknown" ? L" " + BatteryDisplay(mouse) : L"");
     }
     const auto lowest = std::min_element(g_mice.begin(), g_mice.end(), [](const MouseDevice& a, const MouseDevice& b) {
         const int aPercent = a.percent < 0 ? 101 : a.percent;
@@ -699,10 +812,21 @@ BYTE RazerTransactionId(USHORT pid) {
     }
 }
 
+DWORD RazerResponseDelayMs(USHORT pid) {
+    switch (pid) {
+    case 0x0062: case 0x0094: case 0x0095: return 400;
+    case 0x001F: case 0x0024: case 0x0025: case 0x0032: case 0x003E: case 0x003F:
+    case 0x0044: case 0x0045: case 0x0059: case 0x005A: case 0x008F: return 1;
+    case 0x007A: case 0x007B: case 0x007C: case 0x007D: case 0x009E: case 0x009F:
+    case 0x00B3: case 0x00B8: case 0x00C1: case 0x00DF: return 60;
+    default: return 31;
+    }
+}
+
 enum class RazerStatus { Success, Sleeping, Unsupported, NoReply, TimedOut, Rejected };
 struct RazerReply { RazerStatus status = RazerStatus::NoReply; BYTE value = 0; };
 
-RazerReply RazerQuery(HidIo& io, BYTE transactionId, BYTE command, ULONGLONG deviceDeadline) {
+RazerReply RazerQuery(HidIo& io, BYTE transactionId, BYTE command, DWORD responseDelayMs, ULONGLONG deviceDeadline) {
     if (g_stopRequested.load(std::memory_order_relaxed)) return { RazerStatus::NoReply, 0 };
     const ULONGLONG now = GetTickCount64();
     if (now >= deviceDeadline) return { RazerStatus::NoReply, 0 };
@@ -734,7 +858,7 @@ RazerReply RazerQuery(HidIo& io, BYTE transactionId, BYTE command, ULONGLONG dev
     bool first = true;
     while (GetTickCount64() < deadline) {
         if (g_stopRequested.load(std::memory_order_relaxed)) return { RazerStatus::NoReply, 0 };
-        const DWORD delay = std::min<DWORD>(first ? 60 : 75,
+        const DWORD delay = std::min<DWORD>(first ? responseDelayMs : 75,
             static_cast<DWORD>(std::max<ULONGLONG>(1, deadline - GetTickCount64())));
         if (g_stopEvent) {
             if (WaitForSingleObject(g_stopEvent, delay) == WAIT_OBJECT_0) return { RazerStatus::NoReply, 0 };
@@ -771,6 +895,7 @@ RazerReply RazerQuery(HidIo& io, BYTE transactionId, BYTE command, ULONGLONG dev
 
 bool ReadRazer(MouseDevice& mouse, BatteryResult& result) {
     const ULONGLONG deviceDeadline = GetTickCount64() + 1500;
+    const DWORD responseDelayMs = RazerResponseDelayMs(mouse.productId);
     std::vector<const RazerInterface*> interfaces;
     interfaces.reserve(mouse.razerInterfaces.size());
     for (const auto& deviceInterface : mouse.razerInterfaces) interfaces.push_back(&deviceInterface);
@@ -793,7 +918,7 @@ bool ReadRazer(MouseDevice& mouse, BatteryResult& result) {
         if (!io.IsOpen()) continue;
         for (size_t i = 0; i < _countof(tids); ++i) {
             if (std::find(tids, tids + i, tids[i]) != tids + i) continue;
-            const auto reply = RazerQuery(io, tids[i], 0x80, deviceDeadline);
+            const auto reply = RazerQuery(io, tids[i], 0x80, responseDelayMs, deviceDeadline);
             if (reply.status == RazerStatus::TimedOut) {
                 result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
                 return false;
@@ -802,7 +927,7 @@ bool ReadRazer(MouseDevice& mouse, BatteryResult& result) {
                 mouse.razerPath = deviceInterface->path;
                 mouse.razerTid = tids[i];
                 const int percent = std::clamp(static_cast<int>(std::lround(reply.value * 100.0 / 255.0)), 0, 100);
-                const auto charge = RazerQuery(io, tids[i], 0x84, deviceDeadline);
+                const auto charge = RazerQuery(io, tids[i], 0x84, responseDelayMs, deviceDeadline);
                 const int charging = charge.status == RazerStatus::Success ? (charge.value != 0 ? 1 : 0) : mouse.charging;
                 result = { mouse.key, percent, charging, L"connected" };
                 return true;
@@ -869,14 +994,52 @@ bool LogitechGetFeatureIndex(HidIo& io, HidIo* shortIo, BYTE slot, USHORT featur
     return true;
 }
 
+bool LogitechIsMouseSlot(HidIo& io, HidIo* shortIo, BYTE slot, bool& unreachable) {
+    BYTE nameFeature = 0;
+    if (!LogitechGetFeatureIndex(io, shortIo, slot, 0x0005, nameFeature, unreachable)) return false;
+    const auto kind = HidppRequest(io, shortIo, slot, nameFeature, 2, nullptr, 0);
+    if (kind.status != HidppStatus::Ok) {
+        unreachable = kind.status != HidppStatus::HidppError;
+        return false;
+    }
+    // HID++ DeviceName.GetType reports 3, 4 or 5 for mouse classes.
+    return kind.params[0] >= 3 && kind.params[0] <= 5;
+}
+
+int LogitechVoltageToPercent(int millivolts) {
+    static constexpr int curve[][2] = {
+        { 4186, 100 }, { 4067, 90 }, { 3989, 80 }, { 3922, 70 }, { 3859, 60 },
+        { 3811, 50 }, { 3778, 40 }, { 3751, 30 }, { 3717, 20 }, { 3671, 10 },
+        { 3646, 5 }, { 3579, 2 }, { 3500, 0 }
+    };
+    if (millivolts >= curve[0][0]) return 100;
+    for (size_t i = 1; i < _countof(curve); ++i) {
+        const int highMv = curve[i - 1][0], highPercent = curve[i - 1][1];
+        const int lowMv = curve[i][0], lowPercent = curve[i][1];
+        if (millivolts >= lowMv) {
+            return lowPercent + (millivolts - lowMv) * (highPercent - lowPercent) / (highMv - lowMv);
+        }
+    }
+    return 0;
+}
+
 bool LogitechQueryBattery(HidIo& io, HidIo* shortIo, BYTE slot, BYTE featureIndex, USHORT featureId,
     int& percent, int& charging) {
     if (featureId == 0x1004) {
         const auto capabilities = HidppRequest(io, shortIo, slot, featureIndex, 0, nullptr, 0);
-        if (capabilities.status != HidppStatus::Ok || (capabilities.params[1] & 0x02) == 0) return false;
+        if (capabilities.status != HidppStatus::Ok) return false;
         const auto reply = HidppRequest(io, shortIo, slot, featureIndex, 1, nullptr, 0);
         if (reply.status != HidppStatus::Ok || reply.params[0] > 100) return false;
         percent = reply.params[0];
+        if (percent == 0) {
+            switch (reply.params[1]) {
+            case 8: percent = 90; break;
+            case 4: percent = 50; break;
+            case 2: percent = 20; break;
+            case 1: percent = 5; break;
+            default: if (reply.params[2] == 3) percent = 100; else return false; break;
+            }
+        }
         switch (reply.params[2]) {
         case 0: case 3: charging = 0; break;
         case 1: case 2: case 4: charging = 1; break;
@@ -886,13 +1049,25 @@ bool LogitechQueryBattery(HidIo& io, HidIo* shortIo, BYTE slot, BYTE featureInde
     }
     if (featureId == 0x1000) {
         const auto reply = HidppRequest(io, shortIo, slot, featureIndex, 0, nullptr, 0);
-        if (reply.status != HidppStatus::Ok || reply.params[0] == 0 || reply.params[0] > 100) return false;
-        percent = reply.params[0];
+        if (reply.status != HidppStatus::Ok || reply.params[0] > 100) return false;
+        percent = reply.params[0] != 0 ? reply.params[0] : (reply.params[2] == 3 ? 100 : -1);
+        if (percent < 0) return false;
         switch (reply.params[2]) {
         case 0: case 3: charging = 0; break;
         case 1: case 2: case 4: charging = 1; break;
         default: charging = -1; break;
         }
+        return true;
+    }
+    if (featureId == 0x1001) {
+        const auto reply = HidppRequest(io, shortIo, slot, featureIndex, 0, nullptr, 0);
+        if (reply.status != HidppStatus::Ok) return false;
+        const int millivolts = (static_cast<int>(reply.params[0]) << 8) | reply.params[1];
+        // This curve is for a single-cell Li-ion pack. Ignore voltages outside that range rather than
+        // presenting AA/AAA or multi-cell battery voltage as a misleading percentage.
+        if (millivolts < 3500 || millivolts > 4500) return false;
+        percent = LogitechVoltageToPercent(millivolts);
+        charging = reply.params[2] & 0x80 ? 1 : 0;
         return true;
     }
     return false;
@@ -916,7 +1091,11 @@ bool LogitechTryTransport(MouseDevice& mouse, bool receiver, int& percent, int& 
     const BYTE lastSlot = receiver ? 6 : 0xFF;
     for (BYTE slot = firstSlot; slot <= lastSlot; ++slot) {
         bool unreachable = false;
-        for (USHORT featureId : { static_cast<USHORT>(0x1004), static_cast<USHORT>(0x1000) }) {
+        if (receiver && !LogitechIsMouseSlot(longIo, shortHandle, slot, unreachable)) {
+            if (unreachable) break;
+            continue;
+        }
+        for (USHORT featureId : { static_cast<USHORT>(0x1004), static_cast<USHORT>(0x1000), static_cast<USHORT>(0x1001) }) {
             BYTE featureIndex = 0;
             if (!LogitechGetFeatureIndex(longIo, shortHandle, slot, featureId, featureIndex, unreachable)) {
                 if (unreachable) break;
@@ -977,6 +1156,83 @@ bool ReadLamzu(MouseDevice& mouse, BatteryResult& result) {
     if (LamzuTryTransport(mouse, false, percent, charging) || LamzuTryTransport(mouse, true, percent, charging)) {
         result = { mouse.key, percent, charging, L"connected" };
         return true;
+    }
+    result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+    return false;
+}
+
+bool ReadSteelSeries(MouseDevice& mouse, BatteryResult& result) {
+    const auto* model = SteelSeriesMouseModel(mouse.productId);
+    if (!model || mouse.steelSeriesPath.empty()) return false;
+    HidIo io(mouse.steelSeriesPath);
+    if (!io.IsOpen()) return false;
+    HidD_FlushQueue(io.NativeHandle());
+
+    const BYTE command = model->protocol == SteelSeriesProtocol::Rival ? 0xAA
+        : model->wireless ? 0xD2 : 0x92;
+    BYTE request[3]{};
+    request[1] = command;
+    if (model->protocol == SteelSeriesProtocol::Rival) request[2] = 0x01;
+    const DWORD requestLength = model->protocol == SteelSeriesProtocol::Rival ? 3 : 2;
+    std::vector<BYTE> outputReport(std::max<DWORD>(mouse.steelSeriesOutputLength, requestLength));
+    std::copy(request, request + requestLength, outputReport.begin());
+    if (!io.Write(outputReport.data(), static_cast<DWORD>(outputReport.size()), 300)) {
+        result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+        return false;
+    }
+
+    auto parse = [&](const BYTE* report, int length, int& percent, int& charging) {
+        if (length < 1 || report[0] != 0) return false;
+        if (model->protocol == SteelSeriesProtocol::Aerox) {
+            if (length < 3) return false;
+            const int encodedLevel = report[2] & 0x7F;
+            const int level = (encodedLevel - 1) * 5;
+            if (level < 0 || level > 100) return false;
+            percent = level;
+            charging = (report[2] & 0x80) != 0 ? 1 : 0;
+            return true;
+        }
+        if (model->protocol == SteelSeriesProtocol::AeroxGen2) {
+            if (length < 4 || report[1] != command) return false;
+            if (report[2] > 2) return false;
+            percent = report[3] <= 100 ? report[3] : -1;
+            charging = report[2] == 1 ? 1 : (report[2] <= 2 ? 0 : -1);
+            return true;
+        }
+        if (length < 4 || report[1] > 100) return false;
+        percent = report[1];
+        charging = report[3] != 0 ? 1 : 0;
+        return true;
+    };
+
+    BYTE response[128]{};
+    bool haveFirstValid = false;
+    int firstPercent = -1;
+    int firstCharging = -1;
+    const ULONGLONG deadline = GetTickCount64() + 300;
+    while (GetTickCount64() < deadline) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) break;
+        const DWORD timeout = static_cast<DWORD>(std::min<ULONGLONG>(20, deadline - now));
+        const int length = io.Read(response, sizeof(response), timeout);
+        if (length < 0) break;
+        if (length == 0) continue;
+        int percent = -1;
+        int charging = -1;
+        const bool parsed = parse(response, length, percent, charging);
+        if (length > 1 && response[1] == command && parsed) {
+            result = { mouse.key, percent, charging, percent >= 0 ? L"connected" : L"unknown" };
+            return percent >= 0;
+        }
+        if (!haveFirstValid && parsed) {
+            haveFirstValid = true;
+            firstPercent = percent;
+            firstCharging = charging;
+        }
+    }
+    if (haveFirstValid) {
+        result = { mouse.key, firstPercent, firstCharging, firstPercent >= 0 ? L"connected" : L"unknown" };
+        return firstPercent >= 0;
     }
     result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
     return false;
@@ -1056,8 +1312,9 @@ DWORD WINAPI BatteryWorker(void* parameter) {
         BatteryResult result{ mouse.key, mouse.percent, mouse.charging, L"unsupported" };
         bool readSuccess = false;
         if (mouse.vendorId == 0x1532 && mouse.razerFeature && IsKnownBatteryMouse(mouse.vendorId, mouse.productId)) readSuccess = ReadRazer(mouse, result);
-        else if (mouse.vendorId == 0x046D && (mouse.productId == 0xC095 || mouse.productId == 0xC547)) readSuccess = ReadLogitech(mouse, result);
+        else if (mouse.vendorId == 0x046D && (!mouse.wiredPath.empty() || !mouse.receiverPath.empty())) readSuccess = ReadLogitech(mouse, result);
         else if (mouse.vendorId == 0x3554 && (mouse.productId == 0xF50F || mouse.productId == 0xF510)) readSuccess = ReadLamzu(mouse, result);
+        else if (mouse.vendorId == 0x1038 && !mouse.steelSeriesPath.empty()) readSuccess = ReadSteelSeries(mouse, result);
         if (!readSuccess) readSuccess = ReadGenericBatteryFeature(mouse, result);
         if (!readSuccess) readSuccess = ReadWindowsBluetoothBattery(mouse, result);
         if (!readSuccess && result.percent >= 0 && result.state == L"unsupported") result.state = L"cached";
@@ -1082,6 +1339,7 @@ std::vector<std::wstring> PollingPaths(const MouseDevice& mouse) {
     add(mouse.wiredPath);
     add(mouse.receiverPath);
     add(mouse.errorPath);
+    add(mouse.steelSeriesPath);
     for (const auto& path : mouse.razerInterfaces) add(path.path);
     for (const auto& endpoint : mouse.genericBatteryEndpoints) add(endpoint.path);
     return paths;
