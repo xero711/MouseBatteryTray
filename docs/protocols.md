@@ -1,51 +1,52 @@
-# 読み出し方式
+# HID 検出とバッテリー読み取り
 
-このアプリは、対象の受信機・HIDコレクションにバッテリー問い合わせだけを送り、応答が合っている場合に残量を表示します。ボタン割り当てやDPIなどの設定は変更しません。
+この文書は `native/MouseBatteryTray.cpp` の軽量版について説明します。残量の取得にはバッテリー問い合わせだけを使い、ボタン割り当てやDPIなどのマウス設定は変更しません。
 
-## G502 X PLUS
+## 検出と更新
 
-- 対象: 有線USB `046D:C095` と LIGHTSPEED レシーバー `046D:C547`。両方見つかった場合は充電経路である有線を優先します。
-- 方式: Logitech HID++ 2.0。どちらもHID usage page `FF00` の長いレポートコレクション `0002` にだけ問い合わせます。有線は device index `FF`、受信機はslot 1〜6を検索します。受信機のslotエラー確認に限って短い `FF00:0001` コレクションを読み取り専用で開きます。
-- バッテリー機能はUnified Battery `0x1004` を優先します。先にcapabilityを問い合わせ、百分率対応フラグがある場合だけ数値を表示します。対応しない場合はBattery Status `0x1000` を読みます。`0x1004` の百分率対応フラグがある場合は0%も有効値です。`0x1000` の0は不明値なので0%として扱いません。
-- 応答はレポートID、device index/slot、feature、function、software IDが問い合わせと一致したものだけ受け入れます。有線と受信機のfeature経路キャッシュは分離します。
+- Windows HID の Generic Desktop / Mouse (`0x01:0x02`) コレクションと、既知機種の専用バッテリーコレクションを列挙します。
+- 起動時とWindowsのデバイス到着・取り外し通知を受けたときに再列挙します。
+- 残量は約1秒ごとに別スレッドから問い合わせます。機器が値を通知しない限り、残量更新自体はポーリングです。
+- 同時表示数は1〜4台です。WindowsのHID Container IDで同じ物理機器の複数コレクションをまとめ、同型番の別マウスは別項目にします。Container IDが取得できない機器はHIDパスで識別します。
+- 日本語/英語、表示数は `%LOCALAPPDATA%\MouseBatteryTray\settings.ini` に保存します。Windows起動時の開始設定は現在ユーザーの `Run` レジストリキーを使います。
+
+## Logitech G502 X PLUS
+
+- 対象: USB `046D:C095` と LIGHTSPEED レシーバー `046D:C547`。
+- HID++ 2.0。usage page `FF00` の長い `0002` レポートコレクションに要求し、有線はdevice index `FF`、レシーバーはslot 1〜6を確認します。レシーバーslotのエラー確認にだけ短い `FF00:0001` コレクションを開きます。
+- Unified Battery `0x1004` を優先し、百分率対応フラグが無い場合は Battery Status `0x1000` を試します。0%を不明値として扱うかどうかは使用するfeatureに従います。
+- HID++の有効な応答経路をキャッシュして、次回以降の問い合わせを短縮します。
+- 1台のレシーバー内で複数slotが応答する場合、現状は最初のバッテリー応答slotだけを表示します。
 
 ## LAMZU Maya
 
-- 対象: 有線USB `3554:F50F` とこのPCで見つかった4Kレシーバー `3554:F510`。両方見つかった場合は有線を優先します。
-- 方式: HID usage page/usage `FF02:0002` のコレクションで、Compx report-8の読み取り専用バッテリーコマンド `08 04` を送ります。17バイトの応答のヘッダー、チェックサム、残量(0〜100)を確認し、取得元がUSBか受信機かを記録します。
-- 対象コレクションが見つからない場合は「未接続」、コレクションはあるが応答しない場合は「スリープ中」と表示します。取得できていない残量は作らず、前回値があれば最大300秒間、灰色の値とスリープ印で表示します。
-
-`3554:F510` はPC上で確認したLAMZU 4KレシーバーのID、`3554:F50F` は有線接続中に確認したマウスのIDです。公開資料では同じIDのレシーバーをCompx系と扱う例がありますが、受信機IDだけでは内部のマウスモデルまでは特定できません。このアプリではユーザー指定に従って表示名を「LAMZU Maya」としています。
+- 対象: USB `3554:F50F` と4Kレシーバー `3554:F510`。
+- usage page/usage `FF02:0002` のコレクションにCompx report-8のバッテリーコマンド `08 04` を送ります。17 byte応答のヘッダー、チェックサム、残量(0〜100)を確認します。
+- `3554:F510` は開発PCで確認した4KレシーバーのIDです。製品内部のマウスモデルまではレシーバーIDのみで特定しません。
 
 ## Razer wireless mice
 
-- Vendor ID `1532` の電池対応マウスPIDだけを専用プロバイダーに渡します。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めません。PID表とtransaction IDは、OpenRazerの電池対応リストとHaloBatteryの実装記録を参照しています。
-- HID feature reportはWindowsのreport-ID byteを含む91 byte bufferで、残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求と一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
-- ほとんどの対象PIDはtransaction ID `0x1F`、旧型は `0x3F` または `0xFF` です。PIDごとの優先値を使い、既知の代替値を試します。インターフェイスが見つからない、または応答が一致しない場合は残量を作らず、前回値を最大300秒表示します。
-- Razerのマウス実機が開発PCに無いため、このプロバイダーはコード上の確認のみです。ユーザーのRazer実機で応答と残量値を確認する必要があります。
+- Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めていません。
+- Windowsのreport-ID byteを含む91 byte Feature reportを使います。残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求に一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
+- PIDごとの優先transaction IDに加え、代替値を試します。成功したtransaction IDは次回以降に再利用します。
+- PIDとtransaction IDの参照元は [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、対応モデルの確認には[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)を使いました。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
-## 標準HIDマウス
+## 標準HID Battery Strength
 
-- 起動時にHIDのGeneric Desktop / Mouse (`0x01:0x02`) を列挙し、WindowsのHID接続・取り外し通知でも再列挙します。
-- 同時に表示する数は1〜4台です。対応モデルの専用プロバイダーを優先し、それ以外は標準Battery System usage page `0x85` の Battery Strength usage `0x66` がレポートにある場合だけ読み取ります。
-- 標準のBattery Strengthレポートがない機器は一覧に表示しますが、残量は「この機器の残量方式は未対応」とします。マウス入力usageだけでは電池残量を推測しません。
-- 標準レポートと専用プロバイダーは約1秒間隔で確認します。これはポーリング方式です。接続・取り外しの検出はWindows通知による即時再走査ですが、残量の変化を機器が自発通知しない限り、完全なイベント駆動にはなりません。
+- HID Feature report descriptor内に Generic Device Controls / Battery Strength (`0x06:0x20`) usageがある場合に読み取ります。
+- HIDPでFeature report値を取得し、論理値の範囲を0〜100%に換算します。レポートの無い機器や、Feature reportを公開しない機器では値を表示しません。
+- Battery Strength usageがマウスと別のHID機能として公開される機器との自動対応付け、および入力レポートを使う読み取りは現在行いません。
 
-HID Usage Tables ではマウス入力と Battery System が別のusageとして定義されています。Battery System usageは全マウスに必須ではなく、メーカー独自の読み取り手順が必要な場合があります。
+## 適用範囲と確認上の制限
 
-## トレイの状態表示
+通常のマウス入力だけで電池残量は分かりません。HID Usage TablesにあるBattery Strength usageをすべてのマウスが公開するわけではなく、無線マウスの多くはメーカー独自方式を使います。そのため、HIDマウスを一覧に検出できても、バッテリー対応機種でないと残量は取得できません。Bluetooth GATT専用の機器や、未実装メーカー独自方式も未対応です。
 
-- 残量は緑・橙・赤のゲージで示し、充電中は黄色い稲妻を重ねます。
-- スリープ中は最後に取得した値を灰色で示し、青い `Z` 印を付けます。前回値がない場合もスリープ印だけを表示します。
-- 正確な0%は空の赤いゲージと `!`、1〜15%は短い赤いゲージで区別します。
-- 未接続は斜線、不明・初回読み込みは `?` 印で示します。無応答や未接続をバッテリー切れとして表示しません。
+同じマウスがUSB接続とレシーバー接続の両方で別のHID機器として現れると、2項目になる場合があります。Logitechのレシーバーで複数slotを使う場合も、今の版では1台分しか表示できません。
 
-## 参考資料
+参考:
 
+- [USB-IF HID Usage Tables 1.7](https://usb.org/document-library/hid-usage-tables-17)
+- [Microsoft: Battery and charging](https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/battery-and-charging)
 - [Logitech HID++ 2.0 protocol overview](https://github.com/Logitech/cpg-docs/blob/master/hidpp20/README.rst)
-- [HaloBattery protocol notes](https://github.com/HeyOkay/HaloBattery/blob/main/docs/protocols.md) — G502 X PLUS、Logitech battery features、Compx report-8
-- [HaloBattery LAMZU provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/lamzu.py) — `3554:F510` のCompxコレクション識別とreport-8読み出し例
-- [HidSharp 2.6.4](https://www.nuget.org/packages/HidSharp/2.6.4)
-- [USB-IF HID Usage Tables](https://usb.org/sites/default/files/hut1_5.pdf)
-- [HaloBattery Razer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py) — PID / transaction-ID とFeature reportの参照実装 (MIT、権利表示は [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md))
-- [OpenRazer mouse driver](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c) — 対応PIDの参照元
+- [HaloBattery protocol notes](https://github.com/HeyOkay/HaloBattery/blob/main/docs/protocols.md)
+- [HaloBattery LAMZU provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/lamzu.py)

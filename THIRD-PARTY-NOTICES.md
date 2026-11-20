@@ -1,11 +1,11 @@
 # Third-party notices
 
-The Razer PID, model-name, and transaction-ID reference table in `MouseBatteryTray/Hardware/RazerMouseProvider.cs` was prepared from the device table in HaloBattery's `providers/razer.py`:
+The Razer PID, model-name, and transaction-ID reference table used by the managed and native implementations was prepared from the device table in HaloBattery's `providers/razer.py`:
 
 - https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py
 - https://github.com/HeyOkay/HaloBattery/blob/main/LICENSE
 
-HaloBattery is licensed under the MIT License. The protocol implementation in this project is an independent C# implementation; the notice is retained for the referenced device mapping and protocol documentation.
+HaloBattery is licensed under the MIT License. The protocol implementations in this project are independent C# and C++ implementations; this notice is retained for the referenced device mapping and protocol documentation.
 
 ```text
 MIT License

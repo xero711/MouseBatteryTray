@@ -1,43 +1,38 @@
 # Mouse Battery Tray
 
-Windows の通知領域で、接続中のマウスを検出してバッテリー残量を表示するアプリです。
+Windows の通知領域で、接続中の HID マウスを一覧表示し、対応する機器のバッテリー残量を表示する軽量アプリです。通常の検出は Windows の接続・取り外し通知を使い、残量は約1秒ごとに確認します。
 
 ## 機能
 
-- HID のマウスコレクションを起動時と機器の接続・取り外し時に再検出します。
-- バッテリー値を取得できる機器は約1秒間隔で更新します。接続・取り外しは Windows のデバイス通知を受けて再走査します。
-- 同時に表示するマウス数を1〜4台から選べます。設定は `%LOCALAPPDATA%\MouseBatteryTray\settings.json` に保存します。
-- 表示言語は日本語と英語を選択できます。
-- 「Windows 起動時に開始」は通知領域メニューからオン・オフできます。既定値はオフです。
-- 15%以下は赤く表示して通知し、取得できない値を0%として扱いません。
+- HID マウスを起動時と機器の接続・取り外し時に検出します。
+- 同時に表示する HID 機器数を1〜4台から設定できます。機器ごとの設定は `%LOCALAPPDATA%\MouseBatteryTray\settings.ini` に保存します。
+- 表示言語は日本語と英語から選べます。
+- 「Windows 起動時に開始」を通知領域メニューでオン・オフできます。既定値はオフです。
+- 通知領域メニューとパネルで、取得した残量と未取得状態を確認できます。
 
-## 対応範囲
+## バッテリー対応範囲
 
-現在、専用バッテリー読み取りに対応する機種は次のとおりです。
+- Logitech G502 X PLUS の USB と LIGHTSPEED HID++ 接続
+- LAMZU Maya の USB とレシーバー接続
+- Razer の実装済み wireless PID 群（Naga、Mamba、Lancehead、Atheris、Pro Click、Viper、DeathAdder、Basilisk、Cobra Pro など）
+- マウスのHID Feature reportに標準 Generic Device Controls / Battery Strength usage (`0x06:0x20`) がある機器
 
-- Logitech G502 X PLUS (USB `046D:C095`、LIGHTSPEED レシーバー `046D:C547`)
-- LAMZU Maya (USB `3554:F50F`、4Kレシーバー `3554:F510`)
-- Razer の対応済み wireless PID 群（Naga、Mamba、Ouroboros、Lancehead、Atheris、Pro Click、Viper、DeathAdder、Basilisk、Cobra Pro など）
-- HID Battery System の Battery Strength レポートを公開するマウス
+一般的な HID マウスも一覧に検出しますが、メーカー独自のバッテリー方式だけを持つ機器では残量を取得できません。Bluetooth 機器も Windows が HID として公開し、上記のいずれかの読み取り方式に対応している場合に限ります。すべてのマウスから残量を共通方式で取得できる規格はありません。マウス入力レポートだけから残量を推測することもありません。
 
-Razerの対応PIDは有線専用モデルを除く、既知の電池対応マウスと受信機です。Razerマウス実機がこのPCに無いため、Razerプロトコルの動作はまだ実機確認できていません。アプリは一般的な HID マウスを検出しますが、残量が分かる共通規格を公開しない機種では「この機器の残量方式は未対応」と表示します。無線マウスの多くはメーカー独自プロトコルを使うため、現時点で「すべてのマウスの残量に対応」とは保証できません。未対応機種を追加するには、メーカー・型番・接続方式ごとの読み取り実装が必要です。規格上も HID Battery System は専用の任意コレクションで、通常のマウス入力だけから残量を得られるわけではありません。
-
-## 表示と更新
-
-各マウスのトレイアイコンを左クリックすると、検出した機器の一覧を開きます。右クリックで更新、検出台数、言語、Windows 起動時の開始を設定できます。残量の通知がない機種では、表示更新の間隔を短くしても残量の取得速度は上がりません。
+Razer の各プロトコルはソース参照に基づいて実装していますが、このPCにRazerマウスが無いため実機での動作確認は未完了です。Logitech の1台のレシーバーに複数マウスがペアリングされている場合、現在はレシーバー内で応答した最初のスロットを表示します。USB接続とレシーバー接続の両方が個別に見える機種では、同じ物理マウスが2台として表示されることがあります。
 
 ## メモリ
 
-GC 設定を軽量寄りにし、同じ状態のアイコンを毎回描き直さないようにしています。ただし .NET 10 と Windows Forms のランタイムを使うため、プロセス全体のメモリ使用量10MB未満は達成・保証できていません。既存実行ファイルのアイドル時にも10MBを大きく超える使用量が見られました。10MB未満を必須にする場合、Windows Forms/.NET ランタイムを使わないネイティブ実装への移行が必要です。
+Release版をこのPCで約8秒起動して測定した値は、Private Bytes 2.18 MB、Private Working Set 1.61 MB、共有ページを含むWorking Set 11.87 MBでした。実行ファイルは約182 KiBです。アプリ自身が専有するメモリは10 MB未満ですが、Working Set全体では10 MBを超えます。この短時間の測定は最大負荷の保証ではなく、Windowsの計測方法により表示値は変わります。
 
 ## ビルド
 
-Windows x64 と .NET 10 SDK が必要です。実行には .NET 10 Desktop Runtime が必要です。
+Windows x64 と Visual Studio の C++ デスクトップ開発ツールが必要です。Developer PowerShell または Developer Command Prompt から実行してください。
 
 ```powershell
-dotnet publish .\MouseBatteryTray\MouseBatteryTray.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o .\dist
+msbuild .\native\MouseBatteryTrayNative.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-自己完結版は `--self-contained true -p:IncludeNativeLibrariesForSelfExtract=true` を指定してください。
+実行ファイルは `native\out\Release\MouseBatteryTray.exe` に作成されます。`MouseBatteryTray` フォルダーには旧 .NET / Windows Forms 実装も残しています。軽量版をビルドする場合は `native` のプロジェクトを使用してください。
 
-HID 通信には HidSharp 2.6.4 を使用します。機種別プロトコルと確認資料は [docs/protocols.md](docs/protocols.md) を参照してください。
+機種別プロトコルと確認状況は [docs/protocols.md](docs/protocols.md) を、Razerの参照実装に関するライセンス表示は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。

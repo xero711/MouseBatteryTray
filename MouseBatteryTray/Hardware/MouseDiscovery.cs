@@ -8,7 +8,7 @@ namespace MouseBatteryTray.Hardware;
 internal static class MouseDiscovery
 {
     private const uint MouseUsage = 0x00010002;
-    private const uint BatteryStrengthUsage = 0x00850066;
+    private const uint BatteryStrengthUsage = 0x00060020;
 
     public static List<IMouseBatteryProvider> Discover(int maximum)
     {
@@ -109,7 +109,7 @@ internal static class MouseDiscovery
             if (!_hasBatteryUsage)
             {
                 return new BatteryReading(DeviceId, DisplayName, null, null, BatteryAvailability.Unknown, null,
-                    "Standard HID Battery Strength usage is not exposed");
+                    "Standard HID Generic Device Controls Battery Strength usage is not exposed");
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -131,7 +131,7 @@ internal static class MouseDiscovery
                         stream.GetFeature(buffer, 0, buffer.Length);
                         if (TryReadPercent(report, buffer, out var percent))
                         {
-                            return Available(percent, null, "Standard HID Battery Strength");
+                            return Available(percent, null, "Standard HID Generic Device Controls Battery Strength");
                         }
                     }
                     catch
@@ -150,7 +150,7 @@ internal static class MouseDiscovery
                         var length = stream.Read(buffer, 0, buffer.Length);
                         if (length > 0 && TryReadPercent(report, buffer, out var percent))
                         {
-                            return Available(percent, null, "Standard HID Battery Strength");
+                            return Available(percent, null, "Standard HID Generic Device Controls Battery Strength");
                         }
                     }
                     catch (TimeoutException)

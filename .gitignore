@@ -2,5 +2,7 @@
 **/obj/
 /dist/
 /dist-*/
+/native/out/
+/native/obj/
 *.csproj.user
 *.user
