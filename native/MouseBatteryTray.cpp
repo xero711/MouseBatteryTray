@@ -2,6 +2,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <setupapi.h>
+#include <cfgmgr32.h>
 #include <hidsdi.h>
 #include <hidpi.h>
 #include <hidusage.h>
@@ -31,6 +32,9 @@ constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Ru
 constexpr wchar_t kRunValue[] = L"MouseBatteryTray";
 const GUID kHidInterfaceGuid = { 0x4D1E55B2, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
 const DEVPROPKEY kContainerIdKey = { { 0x8C7ED206, 0x3F8A, 0x4827, { 0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C } }, 2 };
+// Windows exposes these byte percentages on supported Bluetooth PnP nodes.
+const DEVPROPKEY kSystemBatteryLifeKey = { { 0x49CD1F76, 0x5626, 0x4B17, { 0xA4, 0xE8, 0x18, 0xB4, 0xAA, 0x1A, 0x22, 0x13 } }, 10 };
+const DEVPROPKEY kBluetoothBatteryKey = { { 0x104EA319, 0x6EE2, 0x4701, { 0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5 } }, 2 };
 
 enum class Language : int { Japanese = 0, English = 1 };
 struct Settings { int maxMice = 4; Language language = Language::Japanese; };
@@ -70,6 +74,7 @@ struct MouseDevice {
     std::wstring receiverPath;
     std::wstring errorPath;
     std::vector<std::wstring> mousePaths;
+    std::vector<std::wstring> bluetoothBatteryNodeIds;
     USHORT vendorId = 0;
     USHORT productId = 0;
     int percent = -1;
@@ -249,6 +254,38 @@ std::wstring ContainerIdentity(HDEVINFO set, SP_DEVINFO_DATA& info) {
     wchar_t value[64]{};
     if (!StringFromGUID2(container, value, static_cast<int>(_countof(value)))) return L"";
     return value;
+}
+
+std::wstring DeviceInstanceId(HDEVINFO set, SP_DEVINFO_DATA& info) {
+    DWORD required = 0;
+    SetupDiGetDeviceInstanceIdW(set, &info, nullptr, 0, &required);
+    if (!required) return L"";
+    std::vector<wchar_t> id(required);
+    if (!SetupDiGetDeviceInstanceIdW(set, &info, id.data(), required, nullptr)) return L"";
+    return id.data();
+}
+
+void AttachBluetoothBatteryNodes(std::vector<MouseDevice>& mice) {
+    constexpr const wchar_t* enumerators[] = { L"BTHENUM", L"BTHLE", L"BTHLEDEVICE" };
+    for (const auto* enumerator : enumerators) {
+        HDEVINFO set = SetupDiGetClassDevsW(nullptr, enumerator, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+        if (set == INVALID_HANDLE_VALUE) continue;
+        for (DWORD index = 0;; ++index) {
+            SP_DEVINFO_DATA info{ sizeof(info) };
+            if (!SetupDiEnumDeviceInfo(set, index, &info)) break;
+            const auto containerId = ContainerIdentity(set, info);
+            if (containerId.empty() || IsNullContainerId(containerId)) continue;
+            const auto mouse = std::find_if(mice.begin(), mice.end(), [&](const MouseDevice& item) {
+                return item.containerId == containerId;
+            });
+            if (mouse == mice.end()) continue;
+            auto instanceId = DeviceInstanceId(set, info);
+            if (instanceId.empty()) continue;
+            if (std::find(mouse->bluetoothBatteryNodeIds.begin(), mouse->bluetoothBatteryNodeIds.end(), instanceId)
+                == mouse->bluetoothBatteryNodeIds.end()) mouse->bluetoothBatteryNodeIds.push_back(std::move(instanceId));
+        }
+        SetupDiDestroyDeviceInfoList(set);
+    }
 }
 
 std::vector<GenericBatteryFeature> FindBatteryFeatures(PHIDP_PREPARSED_DATA preparsed, const HIDP_CAPS& caps) {
@@ -451,14 +488,29 @@ std::vector<MouseDevice> EnumerateMice() {
         return a.key < b.key;
     });
     if (result.size() > static_cast<size_t>(g_settings.maxMice)) result.resize(g_settings.maxMice);
+    AttachBluetoothBatteryNodes(result);
     return result;
+}
+
+std::wstring BatteryDisplay(const MouseDevice& mouse, bool menuLabel = false) {
+    if (mouse.percent < 0) {
+        return mouse.state == L"sleeping"
+            ? Text(L"スリープ中", L"Sleeping")
+            : menuLabel ? Text(L"残量未取得", L"No battery reading")
+                        : Text(L"残量方式未対応", L"Battery protocol unavailable");
+    }
+    std::wstring label = std::to_wstring(mouse.percent) + L"%";
+    if (mouse.state == L"sleeping") label += Text(L"（スリープ中）", L" (sleeping)");
+    else if (mouse.state == L"cached") label += Text(L"（前回値）", L" (last reading)");
+    else if (mouse.state == L"windows") label += Text(L"（Windows報告値）", L" (Windows reported)");
+    return label;
 }
 
 std::wstring MouseSummary() {
     if (g_mice.empty()) return Text(L"マウス未検出", L"No mice detected");
     if (g_mice.size() == 1) {
         const auto& mouse = g_mice.front();
-        return mouse.name + (mouse.percent >= 0 ? L" " + std::to_wstring(mouse.percent) + L"%" : L"");
+        return mouse.name + (mouse.percent >= 0 ? L" " + BatteryDisplay(mouse) : L"");
     }
     const auto lowest = std::min_element(g_mice.begin(), g_mice.end(), [](const MouseDevice& a, const MouseDevice& b) {
         const int aPercent = a.percent < 0 ? 101 : a.percent;
@@ -466,7 +518,7 @@ std::wstring MouseSummary() {
         return aPercent < bPercent;
     });
     std::wstring summary = std::to_wstring(g_mice.size()) + Text(L"台のマウス", L" mice detected");
-    if (lowest != g_mice.end() && lowest->percent >= 0) summary += L" · " + std::to_wstring(lowest->percent) + L"%";
+    if (lowest != g_mice.end() && lowest->percent >= 0) summary += L" · " + BatteryDisplay(*lowest);
     return summary;
 }
 
@@ -854,16 +906,41 @@ bool ReadGenericBatteryFeature(MouseDevice& mouse, BatteryResult& result) {
     return false;
 }
 
+bool ReadWindowsBluetoothBattery(const MouseDevice& mouse, BatteryResult& result) {
+    for (const auto& nodeId : mouse.bluetoothBatteryNodeIds) {
+        auto mutableId = nodeId;
+        DEVINST deviceInstance{};
+        if (CM_Locate_DevNodeW(&deviceInstance, mutableId.data(), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+        ULONG nodeStatus = 0;
+        ULONG problem = 0;
+        if (CM_Get_DevNode_Status(&nodeStatus, &problem, deviceInstance, 0) != CR_SUCCESS
+            || (nodeStatus & DN_DEVICE_DISCONNECTED) != 0) continue;
+        for (const DEVPROPKEY* key : { &kSystemBatteryLifeKey, &kBluetoothBatteryKey }) {
+            BYTE value = 0;
+            DEVPROPTYPE type = 0;
+            ULONG size = sizeof(value);
+            if (CM_Get_DevNode_PropertyW(deviceInstance, key, &type, &value, &size, 0) != CR_SUCCESS
+                || type != DEVPROP_TYPE_BYTE || size != sizeof(value) || value > 100) continue;
+            result = { mouse.key, value, -1, L"windows" };
+            return true;
+        }
+    }
+    return false;
+}
+
 DWORD WINAPI BatteryWorker(void* parameter) {
     std::unique_ptr<std::vector<MouseDevice>> snapshot(static_cast<std::vector<MouseDevice>*>(parameter));
     auto* results = new std::vector<BatteryResult>();
     results->reserve(snapshot->size());
     for (auto& mouse : *snapshot) {
         BatteryResult result{ mouse.key, mouse.percent, mouse.charging, L"unsupported" };
-        if (mouse.vendorId == 0x1532 && mouse.razerFeature && IsKnownBatteryMouse(mouse.vendorId, mouse.productId)) ReadRazer(mouse, result);
-        else if (mouse.vendorId == 0x046D && (mouse.productId == 0xC095 || mouse.productId == 0xC547)) ReadLogitech(mouse, result);
-        else if (mouse.vendorId == 0x3554 && (mouse.productId == 0xF50F || mouse.productId == 0xF510)) ReadLamzu(mouse, result);
-        if (result.percent < 0) ReadGenericBatteryFeature(mouse, result);
+        bool readSuccess = false;
+        if (mouse.vendorId == 0x1532 && mouse.razerFeature && IsKnownBatteryMouse(mouse.vendorId, mouse.productId)) readSuccess = ReadRazer(mouse, result);
+        else if (mouse.vendorId == 0x046D && (mouse.productId == 0xC095 || mouse.productId == 0xC547)) readSuccess = ReadLogitech(mouse, result);
+        else if (mouse.vendorId == 0x3554 && (mouse.productId == 0xF50F || mouse.productId == 0xF510)) readSuccess = ReadLamzu(mouse, result);
+        if (!readSuccess) readSuccess = ReadGenericBatteryFeature(mouse, result);
+        if (!readSuccess) readSuccess = ReadWindowsBluetoothBattery(mouse, result);
+        if (!readSuccess && result.percent >= 0 && result.state == L"unsupported") result.state = L"cached";
         result.wiredRoute = mouse.wiredRoute;
         result.receiverRoute = mouse.receiverRoute;
         result.razerTid = mouse.razerTid;
@@ -942,10 +1019,7 @@ void OpenPanel() {
                     DrawTextW(dc, Text(L"マウスが検出されていません", L"No mice detected").c_str(), -1, &rect, DT_CENTER | DT_TOP | DT_SINGLELINE);
                 } else {
                     for (const auto& mouse : g_mice) {
-                        const wchar_t* stateText = mouse.state == L"sleeping"
-                            ? (g_settings.language == Language::Japanese ? L"スリープ中" : L"Sleeping")
-                            : (g_settings.language == Language::Japanese ? L"残量方式未対応" : L"Battery protocol unavailable");
-                        std::wstring line = mouse.name + L"    " + (mouse.percent >= 0 ? std::to_wstring(mouse.percent) + L"%" : stateText);
+                        std::wstring line = mouse.name + L"    " + BatteryDisplay(mouse);
                         DrawTextW(dc, line.c_str(), -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE);
                         rect.top += 42;
                     }
@@ -992,10 +1066,7 @@ void AppendLanguageMenu(HMENU menu) {
 void ShowContextMenu() {
     HMENU menu = CreatePopupMenu();
     for (const auto& mouse : g_mice) {
-        const wchar_t* stateText = mouse.state == L"sleeping"
-            ? (g_settings.language == Language::Japanese ? L"スリープ中" : L"Sleeping")
-            : (g_settings.language == Language::Japanese ? L"残量未取得" : L"No battery reading");
-        std::wstring line = mouse.name + L"  " + (mouse.percent >= 0 ? std::to_wstring(mouse.percent) + L"%" : stateText);
+        std::wstring line = mouse.name + L"  " + BatteryDisplay(mouse, true);
         AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, line.c_str());
     }
     if (!g_mice.empty()) AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
