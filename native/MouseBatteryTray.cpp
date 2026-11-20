@@ -4,6 +4,8 @@
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <hidsdi.h>
+#include <devioctl.h>
+#include <hidclass.h>
 #include <hidpi.h>
 #include <hidusage.h>
 #include <dbt.h>
@@ -14,16 +16,20 @@
 #include <cwctype>
 #include <cmath>
 #include <memory>
+#include <atomic>
 
 namespace {
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT WM_BATTERY_RESULTS = WM_APP + 2;
+constexpr UINT WM_BATTERY_WORKER_FINISHED = WM_APP + 3;
 constexpr UINT_PTR TIMER_BATTERY = 1;
 constexpr UINT_PTR TIMER_DEBOUNCE = 2;
+constexpr UINT_PTR TIMER_WORKER_REAP = 3;
+constexpr ULONGLONG kShutdownTimeoutMs = 3000;
 constexpr UINT ID_REFRESH = 100;
 constexpr UINT ID_STARTUP = 101;
 constexpr UINT ID_EXIT = 102;
-constexpr UINT ID_COUNT_BASE = 110;
+constexpr UINT ID_COUNT_BASE = 200;
 constexpr UINT ID_LANGUAGE_BASE = 120;
 constexpr USAGE kBatteryStrengthUsagePage = 0x06;
 constexpr USAGE kBatteryStrengthUsage = 0x20;
@@ -100,6 +106,12 @@ struct BatteryResult {
     int razerTid = -1;
     std::wstring razerPath;
 };
+struct BatteryWorkerRecord {
+    DWORD threadId = 0;
+    std::wstring key;
+    std::vector<std::wstring> paths;
+    HANDLE handle{};
+};
 
 HINSTANCE g_instance{};
 HWND g_window{};
@@ -109,8 +121,16 @@ NOTIFYICONDATAW g_tray{};
 Settings g_settings;
 std::wstring g_iniPath;
 std::vector<MouseDevice> g_mice;
-volatile LONG g_pollActive = 0;
+std::vector<BatteryWorkerRecord> g_batteryWorkers;
+bool g_shuttingDown = false;
+std::atomic<bool> g_stopRequested{ false };
+HANDLE g_stopEvent{};
+HANDLE g_mutex{};
+ULONGLONG g_shutdownDeadline = 0;
 bool g_workingSetTrimmed = false;
+int g_panelScrollOffset = 0;
+int g_panelVisibleRows = 5;
+int g_panelWheelRemainder = 0;
 
 std::wstring Text(const wchar_t* ja, const wchar_t* en) {
     return g_settings.language == Language::Japanese ? ja : en;
@@ -129,7 +149,7 @@ std::wstring SettingsPath() {
 void LoadSettings() {
     g_iniPath = SettingsPath();
     if (g_iniPath.empty()) return;
-    g_settings.maxMice = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"General", L"MaxMice", 4, g_iniPath.c_str())), 1, 4);
+    g_settings.maxMice = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"General", L"MaxMice", 4, g_iniPath.c_str())), 1, 16);
     g_settings.language = GetPrivateProfileIntW(L"General", L"Language", 0, g_iniPath.c_str()) == 1
         ? Language::English : Language::Japanese;
 }
@@ -522,6 +542,22 @@ std::wstring MouseSummary() {
     return summary;
 }
 
+void UpdatePanelScroll(HWND hwnd) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    g_panelVisibleRows = std::max(1, (static_cast<int>(client.bottom) - 36) / 42);
+    const int maxOffset = std::max(0, static_cast<int>(g_mice.size()) - g_panelVisibleRows);
+    g_panelScrollOffset = std::clamp(g_panelScrollOffset, 0, maxOffset);
+    SCROLLINFO info{ sizeof(info) };
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    info.nMin = 0;
+    info.nMax = std::max(0, static_cast<int>(g_mice.size()) - 1);
+    info.nPage = static_cast<UINT>(g_panelVisibleRows);
+    info.nPos = g_panelScrollOffset;
+    SetScrollInfo(hwnd, SB_VERT, &info, TRUE);
+    ShowScrollBar(hwnd, SB_VERT, maxOffset > 0);
+}
+
 void UpdateTray() {
     if (!g_tray.hWnd) return;
     const auto summary = MouseSummary();
@@ -545,7 +581,10 @@ void ScanDevices() {
     }
     g_mice = std::move(next);
     UpdateTray();
-    if (g_panel && IsWindowVisible(g_panel)) InvalidateRect(g_panel, nullptr, TRUE);
+    if (g_panel && IsWindowVisible(g_panel)) {
+        UpdatePanelScroll(g_panel);
+        InvalidateRect(g_panel, nullptr, TRUE);
+    }
 }
 
 void TrimWorkingSetOnce() {
@@ -566,20 +605,37 @@ public:
         Close();
         handle_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            handle_ = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        }
         if (handle_ == INVALID_HANDLE_VALUE) return false;
         event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!event_) { Close(); return false; }
         return true;
     }
     bool IsOpen() const { return handle_ != INVALID_HANDLE_VALUE && event_ != nullptr; }
+    HANDLE NativeHandle() const { return handle_; }
+    static constexpr int kTimedOut = -2;
     bool Write(const BYTE* data, DWORD size, DWORD timeoutMs = 250) { return Transfer(true, const_cast<BYTE*>(data), size, timeoutMs) >= 0; }
-    int Read(BYTE* data, DWORD size, DWORD timeoutMs) { return Transfer(false, data, size, timeoutMs); }
+    int Read(BYTE* data, DWORD size, DWORD timeoutMs) {
+        if (g_stopRequested.load(std::memory_order_relaxed)) return -1;
+        const int result = Transfer(false, data, size, timeoutMs);
+        return result == kTimedOut ? 0 : result;
+    }
+    int SetFeature(BYTE* data, DWORD size, DWORD timeoutMs = 250) {
+        return FeatureTransfer(IOCTL_HID_SET_FEATURE, data, size, nullptr, 0, timeoutMs);
+    }
+    int GetFeature(BYTE* data, DWORD size, DWORD timeoutMs = 250) {
+        return FeatureTransfer(IOCTL_HID_GET_FEATURE, nullptr, 0, data, size, timeoutMs);
+    }
 
 private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
     HANDLE event_{};
 
     int Transfer(bool write, BYTE* data, DWORD size, DWORD timeoutMs) {
+        if (g_stopRequested.load(std::memory_order_relaxed)) return kTimedOut;
         if (!IsOpen()) return -1;
         OVERLAPPED overlapped{};
         overlapped.hEvent = event_;
@@ -590,13 +646,39 @@ private:
             : ReadFile(handle_, data, size, &transferred, &overlapped);
         if (ok) return static_cast<int>(transferred);
         if (GetLastError() != ERROR_IO_PENDING) return -1;
-        const DWORD wait = WaitForSingleObject(event_, timeoutMs);
+        const HANDLE waitHandles[] = { event_, g_stopEvent };
+        const DWORD wait = g_stopEvent
+            ? WaitForMultipleObjects(_countof(waitHandles), waitHandles, FALSE, timeoutMs)
+            : WaitForSingleObject(event_, timeoutMs);
         if (wait != WAIT_OBJECT_0) {
             CancelIoEx(handle_, &overlapped);
             // Cancellation is asynchronous. Keep both OVERLAPPED and caller buffer
             // alive until the driver has completed the operation.
             GetOverlappedResult(handle_, &overlapped, &transferred, TRUE);
-            return wait == WAIT_TIMEOUT ? 0 : -1;
+            return wait == WAIT_TIMEOUT || (g_stopEvent && wait == WAIT_OBJECT_0 + 1) ? kTimedOut : -1;
+        }
+        return GetOverlappedResult(handle_, &overlapped, &transferred, FALSE)
+            ? static_cast<int>(transferred) : -1;
+    }
+
+    int FeatureTransfer(DWORD controlCode, BYTE* input, DWORD inputSize, BYTE* output, DWORD outputSize, DWORD timeoutMs) {
+        if (g_stopRequested.load(std::memory_order_relaxed)) return kTimedOut;
+        if (!IsOpen()) return -1;
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event_;
+        ResetEvent(event_);
+        DWORD transferred = 0;
+        const BOOL ok = DeviceIoControl(handle_, controlCode, input, inputSize, output, outputSize, &transferred, &overlapped);
+        if (ok) return static_cast<int>(transferred);
+        if (GetLastError() != ERROR_IO_PENDING) return -1;
+        const HANDLE waitHandles[] = { event_, g_stopEvent };
+        const DWORD wait = g_stopEvent
+            ? WaitForMultipleObjects(_countof(waitHandles), waitHandles, FALSE, timeoutMs)
+            : WaitForSingleObject(event_, timeoutMs);
+        if (wait != WAIT_OBJECT_0) {
+            CancelIoEx(handle_, &overlapped);
+            GetOverlappedResult(handle_, &overlapped, &transferred, TRUE);
+            return wait == WAIT_TIMEOUT || (g_stopEvent && wait == WAIT_OBJECT_0 + 1) ? kTimedOut : -1;
         }
         return GetOverlappedResult(handle_, &overlapped, &transferred, FALSE)
             ? static_cast<int>(transferred) : -1;
@@ -617,10 +699,19 @@ BYTE RazerTransactionId(USHORT pid) {
     }
 }
 
-enum class RazerStatus { Success, Sleeping, Unsupported, NoReply, Rejected };
+enum class RazerStatus { Success, Sleeping, Unsupported, NoReply, TimedOut, Rejected };
 struct RazerReply { RazerStatus status = RazerStatus::NoReply; BYTE value = 0; };
 
-RazerReply RazerQuery(HANDLE handle, BYTE transactionId, BYTE command) {
+RazerReply RazerQuery(HidIo& io, BYTE transactionId, BYTE command, ULONGLONG deviceDeadline) {
+    if (g_stopRequested.load(std::memory_order_relaxed)) return { RazerStatus::NoReply, 0 };
+    const ULONGLONG now = GetTickCount64();
+    if (now >= deviceDeadline) return { RazerStatus::NoReply, 0 };
+    const ULONGLONG deadline = std::min(now + 850, deviceDeadline);
+    const auto remainingTimeout = [&]() -> DWORD {
+        const ULONGLONG current = GetTickCount64();
+        if (current >= deadline || deadline - current < 25) return 0;
+        return static_cast<DWORD>(std::min<ULONGLONG>(250, deadline - current));
+    };
     BYTE request[91]{};
     request[0] = 0;             // HID report id
     request[1] = 0;             // Razer request status
@@ -631,18 +722,31 @@ RazerReply RazerQuery(HANDLE handle, BYTE transactionId, BYTE command) {
     BYTE checksum = 0;
     for (int i = 3; i <= 88; ++i) checksum ^= request[i];
     request[89] = checksum;
-    if (!HidD_SetFeature(handle, request, sizeof(request))) return { RazerStatus::Rejected, 0 };
+    DWORD timeout = remainingTimeout();
+    if (!timeout) return { RazerStatus::NoReply, 0 };
+    const int setResult = io.SetFeature(request, sizeof(request), timeout);
+    if (setResult == HidIo::kTimedOut) return { RazerStatus::TimedOut, 0 };
+    if (setResult < 0) return { RazerStatus::Rejected, 0 };
 
     BYTE response[91]{};
-    const ULONGLONG deadline = GetTickCount64() + 850;
     int foreignResponses = 0;
     int sends = 1;
     bool first = true;
     while (GetTickCount64() < deadline) {
-        Sleep(first ? 60 : 75);
+        if (g_stopRequested.load(std::memory_order_relaxed)) return { RazerStatus::NoReply, 0 };
+        const DWORD delay = std::min<DWORD>(first ? 60 : 75,
+            static_cast<DWORD>(std::max<ULONGLONG>(1, deadline - GetTickCount64())));
+        if (g_stopEvent) {
+            if (WaitForSingleObject(g_stopEvent, delay) == WAIT_OBJECT_0) return { RazerStatus::NoReply, 0 };
+        } else Sleep(delay);
         first = false;
+        if (g_stopRequested.load(std::memory_order_relaxed)) return { RazerStatus::NoReply, 0 };
         response[0] = 0;
-        if (!HidD_GetFeature(handle, response, sizeof(response))) return { RazerStatus::Rejected, 0 };
+        timeout = remainingTimeout();
+        if (!timeout) return { RazerStatus::NoReply, 0 };
+        const int getResult = io.GetFeature(response, sizeof(response), timeout);
+        if (getResult == HidIo::kTimedOut) return { RazerStatus::TimedOut, 0 };
+        if (getResult < 0) return { RazerStatus::Rejected, 0 };
         const bool matches = response[2] == transactionId && response[7] == 0x07 && response[8] == command;
         if (matches) {
             switch (response[1]) {
@@ -654,7 +758,11 @@ RazerReply RazerQuery(HANDLE handle, BYTE transactionId, BYTE command) {
             }
         }
         if (response[1] == 0x02 && ++foreignResponses % 4 == 0 && sends < 3) {
-            if (!HidD_SetFeature(handle, request, sizeof(request))) return { RazerStatus::Rejected, 0 };
+            timeout = remainingTimeout();
+            if (!timeout) return { RazerStatus::NoReply, 0 };
+            const int resendResult = io.SetFeature(request, sizeof(request), timeout);
+            if (resendResult == HidIo::kTimedOut) return { RazerStatus::TimedOut, 0 };
+            if (resendResult < 0) return { RazerStatus::Rejected, 0 };
             ++sends;
         }
     }
@@ -662,6 +770,7 @@ RazerReply RazerQuery(HANDLE handle, BYTE transactionId, BYTE command) {
 }
 
 bool ReadRazer(MouseDevice& mouse, BatteryResult& result) {
+    const ULONGLONG deviceDeadline = GetTickCount64() + 1500;
     std::vector<const RazerInterface*> interfaces;
     interfaces.reserve(mouse.razerInterfaces.size());
     for (const auto& deviceInterface : mouse.razerInterfaces) interfaces.push_back(&deviceInterface);
@@ -680,25 +789,33 @@ bool ReadRazer(MouseDevice& mouse, BatteryResult& result) {
     BYTE tids[] = { mouse.razerTid >= 0 ? static_cast<BYTE>(mouse.razerTid) : preferred,
         preferred, 0x1F, 0x3F, 0xFF, 0x9F, 0x08 };
     for (const auto* deviceInterface : interfaces) {
-        HANDLE handle = CreateFileW(deviceInterface->path.c_str(), GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) continue;
+        HidIo io(deviceInterface->path);
+        if (!io.IsOpen()) continue;
         for (size_t i = 0; i < _countof(tids); ++i) {
             if (std::find(tids, tids + i, tids[i]) != tids + i) continue;
-            const auto reply = RazerQuery(handle, tids[i], 0x80);
+            const auto reply = RazerQuery(io, tids[i], 0x80, deviceDeadline);
+            if (reply.status == RazerStatus::TimedOut) {
+                result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+                return false;
+            }
             if (reply.status == RazerStatus::Success) {
                 mouse.razerPath = deviceInterface->path;
                 mouse.razerTid = tids[i];
                 const int percent = std::clamp(static_cast<int>(std::lround(reply.value * 100.0 / 255.0)), 0, 100);
-                const auto charge = RazerQuery(handle, tids[i], 0x84);
-                const int charging = charge.status == RazerStatus::Success ? (charge.value != 0 ? 1 : 0) : -1;
+                const auto charge = RazerQuery(io, tids[i], 0x84, deviceDeadline);
+                const int charging = charge.status == RazerStatus::Success ? (charge.value != 0 ? 1 : 0) : mouse.charging;
                 result = { mouse.key, percent, charging, L"connected" };
-                CloseHandle(handle);
                 return true;
             }
+            const bool cachedRequest = deviceInterface->path == mouse.razerPath
+                && mouse.razerTid == static_cast<int>(tids[i]);
+            if (reply.status == RazerStatus::Sleeping && cachedRequest) {
+                result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
+                return false;
+            }
+            if (reply.status == RazerStatus::Unsupported && cachedRequest) break;
             if (reply.status == RazerStatus::Rejected) break;
         }
-        CloseHandle(handle);
     }
     result = { mouse.key, mouse.percent, mouse.charging, L"sleeping" };
     return false;
@@ -867,24 +984,27 @@ bool ReadLamzu(MouseDevice& mouse, BatteryResult& result) {
 
 bool ReadGenericBatteryFeature(MouseDevice& mouse, BatteryResult& result) {
     for (const auto& endpoint : mouse.genericBatteryEndpoints) {
-        HANDLE handle = CreateFileW(endpoint.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) continue;
+        HidIo io(endpoint.path);
+        if (!io.IsOpen()) continue;
+        HANDLE handle = io.NativeHandle();
 
         PHIDP_PREPARSED_DATA preparsed = nullptr;
         HIDD_ATTRIBUTES attributes{ sizeof(attributes) };
         HIDP_CAPS caps{};
         bool success = false;
+        bool timedOut = false;
         if (HidD_GetAttributes(handle, &attributes) && HidD_GetPreparsedData(handle, &preparsed)
             && HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength > 0) {
             std::vector<BYTE> report(caps.FeatureReportByteLength);
             for (const auto& feature : endpoint.features) {
                 std::fill(report.begin(), report.end(), static_cast<BYTE>(0));
                 report[0] = feature.reportId;
-                if (!HidD_GetFeature(handle, report.data(), static_cast<ULONG>(report.size()))) continue;
+                const int reportLength = io.GetFeature(report.data(), static_cast<DWORD>(report.size()), 1500);
+                if (reportLength == HidIo::kTimedOut) { timedOut = true; break; }
+                if (reportLength <= 0) continue;
                 ULONG raw = 0;
                 if (HidP_GetUsageValue(HidP_Feature, kBatteryStrengthUsagePage, feature.linkCollection, kBatteryStrengthUsage, &raw, preparsed,
-                    reinterpret_cast<PCHAR>(report.data()), static_cast<ULONG>(report.size())) != HIDP_STATUS_SUCCESS) continue;
+                    reinterpret_cast<PCHAR>(report.data()), static_cast<ULONG>(reportLength)) != HIDP_STATUS_SUCCESS) continue;
                 if (feature.logicalMaximum <= feature.logicalMinimum) continue;
                 const int64_t value = feature.logicalMinimum < 0 ? static_cast<LONG>(raw) : static_cast<int64_t>(raw);
                 if (value < feature.logicalMinimum || value > feature.logicalMaximum) continue;
@@ -900,8 +1020,8 @@ bool ReadGenericBatteryFeature(MouseDevice& mouse, BatteryResult& result) {
             }
         }
         if (preparsed) HidD_FreePreparsedData(preparsed);
-        CloseHandle(handle);
         if (success) return true;
+        if (timedOut) return false;
     }
     return false;
 }
@@ -947,20 +1067,86 @@ DWORD WINAPI BatteryWorker(void* parameter) {
         result.razerPath = mouse.razerPath;
         results->push_back(std::move(result));
     }
-    InterlockedExchange(&g_pollActive, 0);
     if (!PostMessageW(g_window, WM_BATTERY_RESULTS, 0, reinterpret_cast<LPARAM>(results))) delete results;
+    PostMessageW(g_window, WM_BATTERY_WORKER_FINISHED, GetCurrentThreadId(), 0);
     return 0;
 }
 
+std::vector<std::wstring> PollingPaths(const MouseDevice& mouse) {
+    std::vector<std::wstring> paths;
+    auto add = [&](const std::wstring& path) {
+        if (!path.empty() && std::find(paths.begin(), paths.end(), path) == paths.end()) paths.push_back(path);
+    };
+    add(mouse.path);
+    for (const auto& path : mouse.mousePaths) add(path);
+    add(mouse.wiredPath);
+    add(mouse.receiverPath);
+    add(mouse.errorPath);
+    for (const auto& path : mouse.razerInterfaces) add(path.path);
+    for (const auto& endpoint : mouse.genericBatteryEndpoints) add(endpoint.path);
+    return paths;
+}
+
+bool SharesPollingPath(const std::vector<std::wstring>& a, const std::vector<std::wstring>& b) {
+    for (const auto& path : a) if (std::find(b.begin(), b.end(), path) != b.end()) return true;
+    return false;
+}
+
 void PollBatteries() {
-    if (InterlockedCompareExchange(&g_pollActive, 1, 0) != 0) return;
-    auto* snapshot = new std::vector<MouseDevice>(g_mice);
-    HANDLE worker = CreateThread(nullptr, 0, BatteryWorker, snapshot, 0, nullptr);
-    if (worker) CloseHandle(worker);
-    else {
-        delete snapshot;
-        InterlockedExchange(&g_pollActive, 0);
+    if (g_shuttingDown) return;
+    for (const auto& mouse : g_mice) {
+        auto paths = PollingPaths(mouse);
+        const bool alreadyPolling = std::any_of(g_batteryWorkers.begin(), g_batteryWorkers.end(), [&](const BatteryWorkerRecord& worker) {
+            return worker.key == mouse.key || SharesPollingPath(paths, worker.paths);
+        });
+        if (alreadyPolling) continue;
+        auto* snapshot = new std::vector<MouseDevice>{ mouse };
+        g_batteryWorkers.push_back({ 0, mouse.key, std::move(paths), nullptr });
+        auto& record = g_batteryWorkers.back();
+        HANDLE worker = CreateThread(nullptr, 0, BatteryWorker, snapshot, 0, &record.threadId);
+        if (worker) {
+            record.handle = worker;
+            SetTimer(g_window, TIMER_WORKER_REAP, 250, nullptr);
+        }
+        else {
+            delete snapshot;
+            g_batteryWorkers.pop_back();
+        }
     }
+}
+
+bool ReapFinishedBatteryWorkers(HWND hwnd) {
+    for (auto it = g_batteryWorkers.begin(); it != g_batteryWorkers.end();) {
+        if (it->handle && WaitForSingleObject(it->handle, 0) == WAIT_OBJECT_0) {
+            CloseHandle(it->handle);
+            it = g_batteryWorkers.erase(it);
+        } else ++it;
+    }
+    if (!g_batteryWorkers.empty()) return false;
+    KillTimer(hwnd, TIMER_WORKER_REAP);
+    if (g_shuttingDown) DestroyWindow(hwnd);
+    return true;
+}
+
+void BeginShutdown(HWND hwnd) {
+    if (g_shuttingDown) return;
+    g_shuttingDown = true;
+    g_stopRequested.store(true, std::memory_order_relaxed);
+    g_shutdownDeadline = GetTickCount64() + kShutdownTimeoutMs;
+    if (g_stopEvent) SetEvent(g_stopEvent);
+    KillTimer(hwnd, TIMER_BATTERY);
+    KillTimer(hwnd, TIMER_DEBOUNCE);
+    if (g_deviceNotify) {
+        UnregisterDeviceNotification(g_deviceNotify);
+        g_deviceNotify = nullptr;
+    }
+    Shell_NotifyIconW(NIM_DELETE, &g_tray);
+    if (g_panel) {
+        DestroyWindow(g_panel);
+        g_panel = nullptr;
+    }
+    if (g_batteryWorkers.empty()) DestroyWindow(hwnd);
+    else SetTimer(hwnd, TIMER_WORKER_REAP, 250, nullptr);
 }
 
 bool StartupEnabled() {
@@ -1018,10 +1204,13 @@ void OpenPanel() {
                 if (g_mice.empty()) {
                     DrawTextW(dc, Text(L"マウスが検出されていません", L"No mice detected").c_str(), -1, &rect, DT_CENTER | DT_TOP | DT_SINGLELINE);
                 } else {
-                    for (const auto& mouse : g_mice) {
-                        std::wstring line = mouse.name + L"    " + BatteryDisplay(mouse);
-                        DrawTextW(dc, line.c_str(), -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE);
-                        rect.top += 42;
+                    for (size_t i = static_cast<size_t>(g_panelScrollOffset); i < g_mice.size(); ++i) {
+                        RECT row = rect;
+                        row.top = 36 + static_cast<int>(i - static_cast<size_t>(g_panelScrollOffset)) * 42;
+                        row.bottom = row.top + 42;
+                        if (row.top >= rect.bottom) break;
+                        std::wstring line = g_mice[i].name + L"    " + BatteryDisplay(g_mice[i]);
+                        DrawTextW(dc, line.c_str(), -1, &row, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
                     }
                 }
                 EndPaint(hwnd, &ps);
@@ -1029,6 +1218,49 @@ void OpenPanel() {
             }
             if (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE) { ShowWindow(hwnd, SW_HIDE); return 0; }
             if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { ShowWindow(hwnd, SW_HIDE); return 0; }
+            if (msg == WM_VSCROLL) {
+                int next = g_panelScrollOffset;
+                switch (LOWORD(wp)) {
+                case SB_LINEUP: --next; break;
+                case SB_LINEDOWN: ++next; break;
+                case SB_PAGEUP: next -= g_panelVisibleRows; break;
+                case SB_PAGEDOWN: next += g_panelVisibleRows; break;
+                case SB_TOP: next = 0; break;
+                case SB_BOTTOM: next = static_cast<int>(g_mice.size()); break;
+                case SB_THUMBPOSITION:
+                case SB_THUMBTRACK: {
+                    SCROLLINFO info{ sizeof(info) };
+                    info.fMask = SIF_TRACKPOS;
+                    GetScrollInfo(hwnd, SB_VERT, &info);
+                    next = info.nTrackPos;
+                    break;
+                }
+                default: return 0;
+                }
+                g_panelScrollOffset = next;
+                UpdatePanelScroll(hwnd);
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
+            if (msg == WM_MOUSEWHEEL) {
+                g_panelWheelRemainder += GET_WHEEL_DELTA_WPARAM(wp);
+                const int notches = g_panelWheelRemainder / WHEEL_DELTA;
+                g_panelWheelRemainder -= notches * WHEEL_DELTA;
+                if (notches != 0) {
+                    UINT scrollLines = 3;
+                    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &scrollLines, 0);
+                    if (scrollLines == WHEEL_PAGESCROLL) scrollLines = static_cast<UINT>(g_panelVisibleRows);
+                    const int rows = std::min(static_cast<int>(scrollLines), g_panelVisibleRows);
+                    g_panelScrollOffset -= notches * rows;
+                    UpdatePanelScroll(hwnd);
+                    InvalidateRect(hwnd, nullptr, TRUE);
+                }
+                return 0;
+            }
+            if (msg == WM_SIZE) {
+                UpdatePanelScroll(hwnd);
+                return 0;
+            }
             return DefWindowProcW(hwnd, msg, wp, lp);
         };
         wc.hInstance = g_instance;
@@ -1037,19 +1269,34 @@ void OpenPanel() {
         wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(DKGRAY_BRUSH));
         RegisterClassW(&wc);
         g_panel = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, kAppName,
-            WS_POPUP | WS_BORDER, 0, 0, 520, 260, nullptr, nullptr, g_instance, nullptr);
+            WS_POPUP | WS_BORDER | WS_VSCROLL, 0, 0, 520, 260, nullptr, nullptr, g_instance, nullptr);
     }
     POINT point{}; GetCursorPos(&point);
-    const int x = point.x - 260;
-    const int y = point.y - 280;
-    SetWindowPos(g_panel, HWND_TOPMOST, x, y, 520, 260, SWP_NOACTIVATE);
+    g_panelScrollOffset = 0;
+    g_panelWheelRemainder = 0;
+    MONITORINFO monitor{ sizeof(monitor) };
+    RECT workArea{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+    if (GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &monitor)) workArea = monitor.rcWork;
+    const int left = static_cast<int>(workArea.left);
+    const int top = static_cast<int>(workArea.top);
+    const int right = static_cast<int>(workArea.right);
+    const int bottom = static_cast<int>(workArea.bottom);
+    const int width = std::min(520, std::max(1, right - left));
+    const int desiredHeight = std::max(260, 48 + static_cast<int>(g_mice.size()) * 42);
+    const int height = std::min(desiredHeight, std::max(1, bottom - top));
+    const int x = std::clamp(static_cast<int>(point.x) - width / 2, left, std::max(left, right - width));
+    int y = static_cast<int>(point.y) - height - 8;
+    if (y < top) y = static_cast<int>(point.y) + 8;
+    y = std::clamp(y, top, std::max(top, bottom - height));
+    SetWindowPos(g_panel, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    UpdatePanelScroll(g_panel);
     ShowWindow(g_panel, SW_SHOWNOACTIVATE);
     InvalidateRect(g_panel, nullptr, TRUE);
 }
 
 void AppendCountMenu(HMENU menu) {
     HMENU sub = CreatePopupMenu();
-    for (int count = 1; count <= 4; ++count) {
+    for (int count = 1; count <= 16; ++count) {
         std::wstring label = std::to_wstring(count) + Text(L"台", count == 1 ? L" mouse" : L" mice");
         AppendMenuW(sub, MF_STRING | (g_settings.maxMice == count ? MF_CHECKED : 0), ID_COUNT_BASE + count, label.c_str());
     }
@@ -1084,6 +1331,9 @@ void ShowContextMenu() {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_CLOSE:
+        BeginShutdown(hwnd);
+        return 0;
     case WM_CREATE: {
         g_tray = {};
         g_tray.cbSize = sizeof(g_tray);
@@ -1107,17 +1357,35 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     }
     case WM_DEVICECHANGE:
+        if (g_shuttingDown) return TRUE;
         if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED) {
             KillTimer(hwnd, TIMER_DEBOUNCE);
             SetTimer(hwnd, TIMER_DEBOUNCE, 250, nullptr);
         }
         return TRUE;
     case WM_TIMER:
-        if (wParam == TIMER_BATTERY) PollBatteries();
-        else if (wParam == TIMER_DEBOUNCE) { KillTimer(hwnd, TIMER_DEBOUNCE); ScanDevices(); }
+        if (wParam == TIMER_WORKER_REAP) {
+            const bool allDone = ReapFinishedBatteryWorkers(hwnd);
+            if (!allDone && g_shuttingDown && GetTickCount64() >= g_shutdownDeadline) {
+                // A misbehaving HID driver may ignore cancellation forever. The
+                // user explicitly requested exit, so don't leave an invisible
+                // process holding the single-instance mutex indefinitely.
+                if (g_mutex) {
+                    ReleaseMutex(g_mutex);
+                    CloseHandle(g_mutex);
+                    g_mutex = nullptr;
+                }
+                TerminateProcess(GetCurrentProcess(), 0);
+            }
+        }
+        else if (!g_shuttingDown) {
+            if (wParam == TIMER_BATTERY) PollBatteries();
+            else if (wParam == TIMER_DEBOUNCE) { KillTimer(hwnd, TIMER_DEBOUNCE); ScanDevices(); }
+        }
         return 0;
     case WM_BATTERY_RESULTS: {
         std::unique_ptr<std::vector<BatteryResult>> results(reinterpret_cast<std::vector<BatteryResult>*>(lParam));
+        if (g_shuttingDown) return 0;
         for (const auto& result : *results) {
             const auto mouse = std::find_if(g_mice.begin(), g_mice.end(), [&](const MouseDevice& item) { return item.key == result.key; });
             if (mouse != g_mice.end()) {
@@ -1134,6 +1402,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (g_panel && IsWindowVisible(g_panel)) InvalidateRect(g_panel, nullptr, TRUE);
         return 0;
     }
+    case WM_BATTERY_WORKER_FINISHED: {
+        ReapFinishedBatteryWorkers(hwnd);
+        return 0;
+    }
     case WM_TRAY:
         if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == NIN_SELECT) OpenPanel();
         else if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) ShowContextMenu();
@@ -1142,8 +1414,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         const UINT id = LOWORD(wParam);
         if (id == ID_REFRESH) ScanDevices();
         else if (id == ID_STARTUP) SetStartup(!StartupEnabled());
-        else if (id == ID_EXIT) DestroyWindow(hwnd);
-        else if (id >= ID_COUNT_BASE + 1 && id <= ID_COUNT_BASE + 4) {
+        else if (id == ID_EXIT) BeginShutdown(hwnd);
+        else if (id >= ID_COUNT_BASE + 1 && id <= ID_COUNT_BASE + 16) {
             g_settings.maxMice = static_cast<int>(id - ID_COUNT_BASE);
             SaveSetting(L"MaxMice", g_settings.maxMice);
             ScanDevices();
@@ -1157,9 +1429,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     }
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_BATTERY);
-        if (g_deviceNotify) UnregisterDeviceNotification(g_deviceNotify);
+        KillTimer(hwnd, TIMER_WORKER_REAP);
+        if (g_deviceNotify) {
+            UnregisterDeviceNotification(g_deviceNotify);
+            g_deviceNotify = nullptr;
+        }
         Shell_NotifyIconW(NIM_DELETE, &g_tray);
-        if (g_panel) DestroyWindow(g_panel);
+        if (g_panel) {
+            DestroyWindow(g_panel);
+            g_panel = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     default: return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -1171,11 +1450,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     LoadSettings();
     SetLastError(ERROR_SUCCESS);
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\MouseBatteryTray.Native");
-    if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (mutex) CloseHandle(mutex);
+    g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\MouseBatteryTray.Native");
+    if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (g_mutex) CloseHandle(g_mutex);
+        g_mutex = nullptr;
         return 0;
     }
+    g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_stopEvent) { CloseHandle(g_mutex); g_mutex = nullptr; return 1; }
     WNDCLASSW wc{};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = instance;
@@ -1183,12 +1465,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     RegisterClassW(&wc);
     g_window = CreateWindowExW(0, wc.lpszClassName, kAppName, WS_OVERLAPPED,
         0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
-    if (!g_window) { CloseHandle(mutex); return 1; }
+    if (!g_window) { CloseHandle(g_stopEvent); CloseHandle(g_mutex); g_stopEvent = nullptr; g_mutex = nullptr; return 1; }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-    CloseHandle(mutex);
+    CloseHandle(g_stopEvent);
+    g_stopEvent = nullptr;
+    if (g_mutex) {
+        ReleaseMutex(g_mutex);
+        CloseHandle(g_mutex);
+        g_mutex = nullptr;
+    }
     return static_cast<int>(message.wParam);
 }
