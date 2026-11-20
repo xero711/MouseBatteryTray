@@ -26,16 +26,16 @@
 
 ## Razer wireless mice
 
-- Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めていません。
+- Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めていません。このアプリはWindowsのBluetooth電池残量APIもまだ使わないため、Orochi V2をBluetooth接続した場合は残量を表示しません。
 - Windowsのreport-ID byteを含む91 byte Feature reportを使います。残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求に一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
 - PIDごとの優先transaction IDに加え、代替値を試します。成功したtransaction IDは次回以降に再利用します。
 - PIDとtransaction IDの参照元は [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、対応モデルの確認には[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)を使いました。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
 ## 標準HID Battery Strength
 
-- HID Feature report descriptor内に Generic Device Controls / Battery Strength (`0x06:0x20`) usageがある場合に読み取ります。
+- HID Feature report descriptor内に Generic Device Controls / Battery Strength (`0x06:0x20`) usageがある場合に読み取ります。マウスとして認識した各HIDインターフェースは直接調べます。その他の兄弟インターフェースは、Windowsが同じ非null Container IDを付け、VID/PIDも一致し、同じContainer ID内にキーボード機能が見つからない場合に限って関連付けます。コンボレシーバーでキーボードの電池をマウスに誤表示しにくくするためです。
 - HIDPでFeature report値を取得し、論理値の範囲を0〜100%に換算します。レポートの無い機器や、Feature reportを公開しない機器では値を表示しません。
-- Battery Strength usageがマウスと別のHID機能として公開される機器との自動対応付け、および入力レポートを使う読み取りは現在行いません。
+- Windowsが別のContainer IDに分けるバッテリー機能、複数の同型HID機器を一つのContainer IDにまとめるレシーバー、Feature reportではなく入力レポートで残量を通知する機器、Bluetooth GATT専用の機器は現在対象外です。複合機器の全インターフェースをWindowsがキーボードとして識別しない場合、別機能の電池レポートを除外できないことがあります。
 
 ## 適用範囲と確認上の制限
 

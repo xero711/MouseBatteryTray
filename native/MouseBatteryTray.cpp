@@ -46,6 +46,16 @@ struct GenericBatteryFeature {
     LONG logicalMinimum = 0;
     LONG logicalMaximum = 100;
 };
+struct GenericBatteryEndpoint {
+    std::wstring path;
+    std::vector<GenericBatteryFeature> features;
+};
+struct GenericBatteryCandidate {
+    std::wstring identity;
+    USHORT vendorId = 0;
+    USHORT productId = 0;
+    GenericBatteryEndpoint endpoint;
+};
 struct RazerInterface {
     std::wstring path;
     USAGE usagePage = 0;
@@ -55,11 +65,11 @@ struct MouseDevice {
     std::wstring key;
     std::wstring name;
     std::wstring path;
-    std::wstring genericBatteryPath;
     std::wstring containerId;
     std::wstring wiredPath;
     std::wstring receiverPath;
     std::wstring errorPath;
+    std::vector<std::wstring> mousePaths;
     USHORT vendorId = 0;
     USHORT productId = 0;
     int percent = -1;
@@ -73,7 +83,7 @@ struct MouseDevice {
     USAGE razerUsagePage = 0;
     USAGE razerUsage = 0;
     std::vector<RazerInterface> razerInterfaces;
-    std::vector<GenericBatteryFeature> batteryFeatures;
+    std::vector<GenericBatteryEndpoint> genericBatteryEndpoints;
 };
 struct BatteryResult {
     std::wstring key;
@@ -95,6 +105,7 @@ Settings g_settings;
 std::wstring g_iniPath;
 std::vector<MouseDevice> g_mice;
 volatile LONG g_pollActive = 0;
+bool g_workingSetTrimmed = false;
 
 std::wstring Text(const wchar_t* ja, const wchar_t* en) {
     return g_settings.language == Language::Japanese ? ja : en;
@@ -222,6 +233,13 @@ std::wstring UsageIdentity(const std::wstring& path) {
     return identity;
 }
 
+bool IsNullContainerId(const std::wstring& containerId) {
+    auto normalized = containerId;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+        [](wchar_t c) { return static_cast<wchar_t>(towupper(c)); });
+    return normalized == L"{00000000-0000-0000-FFFF-FFFFFFFFFFFF}";
+}
+
 std::wstring ContainerIdentity(HDEVINFO set, SP_DEVINFO_DATA& info) {
     GUID container{};
     DEVPROPTYPE type = 0;
@@ -272,6 +290,8 @@ bool HasFeatureReportId(PHIDP_PREPARSED_DATA preparsed, const HIDP_CAPS& caps, B
 std::vector<MouseDevice> EnumerateMice() {
     std::vector<MouseDevice> result;
     std::vector<std::pair<std::wstring, std::wstring>> logitechShortPaths;
+    std::vector<GenericBatteryCandidate> genericBatteryCandidates;
+    std::vector<std::wstring> keyboardContainers;
     HDEVINFO set = SetupDiGetClassDevsW(&kHidInterfaceGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (set == INVALID_HANDLE_VALUE) return result;
 
@@ -286,7 +306,8 @@ std::vector<MouseDevice> EnumerateMice() {
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         SP_DEVINFO_DATA info{ sizeof(info) };
         if (!SetupDiGetDeviceInterfaceDetailW(set, &interfaceData, detail, needed, nullptr, &info)) continue;
-        const auto containerId = ContainerIdentity(set, info);
+        const auto rawContainerId = ContainerIdentity(set, info);
+        const std::wstring containerId = IsNullContainerId(rawContainerId) ? std::wstring{} : rawContainerId;
 
         HANDLE handle = CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -304,6 +325,19 @@ std::vector<MouseDevice> EnumerateMice() {
         const bool known = IsKnownBatteryMouse(attributes.VendorID, attributes.ProductID);
         const bool genericMouse = status == HIDP_STATUS_SUCCESS && caps.UsagePage == 0x01 && caps.Usage == 0x02;
         const std::wstring productName = product[0] ? product : L"HID mouse";
+        const bool keyboardInterface = (status == HIDP_STATUS_SUCCESS && caps.UsagePage == 0x01 && caps.Usage == 0x06)
+            || LooksLikeKeyboard(productName);
+        if (!containerId.empty() && keyboardInterface
+            && std::find(keyboardContainers.begin(), keyboardContainers.end(), containerId) == keyboardContainers.end()) {
+            keyboardContainers.push_back(containerId);
+        }
+        if (!batteryFeatures.empty()) {
+            genericBatteryCandidates.push_back({
+                containerId.empty() ? UsageIdentity(detail->DevicePath) : containerId,
+                attributes.VendorID, attributes.ProductID,
+                { detail->DevicePath, std::move(batteryFeatures) }
+            });
+        }
         const bool razerUsage = caps.UsagePage == 0x0001 || caps.UsagePage == 0xFF00;
         const bool razerFeature = attributes.VendorID == 0x1532 && known && razerUsage
             && caps.FeatureReportByteLength >= 91 && HasFeatureReportId(preparsed, caps, 0);
@@ -330,15 +364,13 @@ std::vector<MouseDevice> EnumerateMice() {
             mouse.containerId = containerId;
             mouse.name = known ? KnownName(mouse.vendorId, mouse.productId) : productName;
             mouse.key = containerId.empty() ? UsageIdentity(mouse.path) : containerId;
+            mouse.mousePaths.push_back(mouse.path);
             mouse.razerFeature = razerFeature;
             if (razerFeature) {
                 mouse.razerUsagePage = caps.UsagePage;
                 mouse.razerUsage = caps.Usage;
                 mouse.razerInterfaces.push_back({ mouse.path, caps.UsagePage, caps.Usage });
             }
-            if (!batteryFeatures.empty()) mouse.genericBatteryPath = mouse.path;
-            mouse.batteryFeatures = std::move(batteryFeatures);
-
             if (attributes.VendorID == 0x046D && (attributes.ProductID == 0xC095 || attributes.ProductID == 0xC547)) {
                 if (attributes.ProductID == 0xC095) {
                     mouse.name = L"G502 X (USB)";
@@ -360,6 +392,9 @@ std::vector<MouseDevice> EnumerateMice() {
             const auto duplicate = std::find_if(result.begin(), result.end(), [&](const MouseDevice& item) { return item.key == mouse.key; });
             if (duplicate == result.end()) result.push_back(std::move(mouse));
             else {
+                if (std::find(duplicate->mousePaths.begin(), duplicate->mousePaths.end(), mouse.path) == duplicate->mousePaths.end()) {
+                    duplicate->mousePaths.push_back(mouse.path);
+                }
                 if (!mouse.wiredPath.empty()) duplicate->wiredPath = mouse.wiredPath;
                 if (!mouse.receiverPath.empty()) duplicate->receiverPath = mouse.receiverPath;
                 if (attributes.VendorID == 0x1532 && razerFeature) {
@@ -376,10 +411,6 @@ std::vector<MouseDevice> EnumerateMice() {
                         duplicate->razerUsage = caps.Usage;
                     }
                 }
-                if (duplicate->batteryFeatures.empty()) {
-                    duplicate->batteryFeatures = std::move(mouse.batteryFeatures);
-                    duplicate->genericBatteryPath = std::move(mouse.genericBatteryPath);
-                }
             }
         }
 
@@ -387,6 +418,23 @@ std::vector<MouseDevice> EnumerateMice() {
         CloseHandle(handle);
     }
     SetupDiDestroyDeviceInfoList(set);
+    for (auto& mouse : result) {
+        const auto identity = mouse.containerId.empty() ? mouse.key : mouse.containerId;
+        const bool containerHasKeyboard = !mouse.containerId.empty()
+            && std::find(keyboardContainers.begin(), keyboardContainers.end(), mouse.containerId) != keyboardContainers.end();
+        for (auto& candidate : genericBatteryCandidates) {
+            if (candidate.identity != identity) continue;
+            const bool directMouseInterface = std::find(mouse.mousePaths.begin(), mouse.mousePaths.end(), candidate.endpoint.path)
+                != mouse.mousePaths.end();
+            if (!directMouseInterface) {
+                if (mouse.containerId.empty() || containerHasKeyboard
+                    || candidate.vendorId != mouse.vendorId || candidate.productId != mouse.productId) continue;
+            }
+            const bool alreadyAdded = std::any_of(mouse.genericBatteryEndpoints.begin(), mouse.genericBatteryEndpoints.end(),
+                [&](const GenericBatteryEndpoint& endpoint) { return endpoint.path == candidate.endpoint.path; });
+            if (!alreadyAdded) mouse.genericBatteryEndpoints.push_back(candidate.endpoint);
+        }
+    }
     for (auto& mouse : result) {
         if (mouse.vendorId != 0x046D || mouse.productId != 0xC547) continue;
         const auto identity = mouse.containerId.empty() ? mouse.key : mouse.containerId;
@@ -446,6 +494,12 @@ void ScanDevices() {
     g_mice = std::move(next);
     UpdateTray();
     if (g_panel && IsWindowVisible(g_panel)) InvalidateRect(g_panel, nullptr, TRUE);
+}
+
+void TrimWorkingSetOnce() {
+    if (g_workingSetTrimmed) return;
+    g_workingSetTrimmed = SetProcessWorkingSetSize(GetCurrentProcess(),
+        static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1)) != FALSE;
 }
 
 class HidIo {
@@ -760,43 +814,44 @@ bool ReadLamzu(MouseDevice& mouse, BatteryResult& result) {
 }
 
 bool ReadGenericBatteryFeature(MouseDevice& mouse, BatteryResult& result) {
-    if (mouse.batteryFeatures.empty()) return false;
-    const auto& path = mouse.genericBatteryPath.empty() ? mouse.path : mouse.genericBatteryPath;
-    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return false;
+    for (const auto& endpoint : mouse.genericBatteryEndpoints) {
+        HANDLE handle = CreateFileW(endpoint.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) continue;
 
-    PHIDP_PREPARSED_DATA preparsed = nullptr;
-    HIDD_ATTRIBUTES attributes{ sizeof(attributes) };
-    HIDP_CAPS caps{};
-    bool success = false;
-    if (HidD_GetAttributes(handle, &attributes) && HidD_GetPreparsedData(handle, &preparsed)
-        && HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength > 0) {
-        std::vector<BYTE> report(caps.FeatureReportByteLength);
-        for (const auto& feature : mouse.batteryFeatures) {
-            std::fill(report.begin(), report.end(), static_cast<BYTE>(0));
-            report[0] = feature.reportId;
-            if (!HidD_GetFeature(handle, report.data(), static_cast<ULONG>(report.size()))) continue;
-            ULONG raw = 0;
-            if (HidP_GetUsageValue(HidP_Feature, kBatteryStrengthUsagePage, feature.linkCollection, kBatteryStrengthUsage, &raw, preparsed,
-                reinterpret_cast<PCHAR>(report.data()), static_cast<ULONG>(report.size())) != HIDP_STATUS_SUCCESS) continue;
-            if (feature.logicalMaximum <= feature.logicalMinimum) continue;
-            const int64_t value = feature.logicalMinimum < 0 ? static_cast<LONG>(raw) : static_cast<int64_t>(raw);
-            if (value < feature.logicalMinimum || value > feature.logicalMaximum) continue;
-            const double percentValue = feature.logicalMinimum >= 0 && feature.logicalMaximum <= 100
-                ? static_cast<double>(value)
-                : (static_cast<double>(value - feature.logicalMinimum) * 100.0)
-                    / static_cast<double>(feature.logicalMaximum - feature.logicalMinimum);
-            const int percent = static_cast<int>(std::lround(percentValue));
-            if (percent < 0 || percent > 100) continue;
-            result = { mouse.key, percent, -1, L"connected" };
-            success = true;
-            break;
+        PHIDP_PREPARSED_DATA preparsed = nullptr;
+        HIDD_ATTRIBUTES attributes{ sizeof(attributes) };
+        HIDP_CAPS caps{};
+        bool success = false;
+        if (HidD_GetAttributes(handle, &attributes) && HidD_GetPreparsedData(handle, &preparsed)
+            && HidP_GetCaps(preparsed, &caps) == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength > 0) {
+            std::vector<BYTE> report(caps.FeatureReportByteLength);
+            for (const auto& feature : endpoint.features) {
+                std::fill(report.begin(), report.end(), static_cast<BYTE>(0));
+                report[0] = feature.reportId;
+                if (!HidD_GetFeature(handle, report.data(), static_cast<ULONG>(report.size()))) continue;
+                ULONG raw = 0;
+                if (HidP_GetUsageValue(HidP_Feature, kBatteryStrengthUsagePage, feature.linkCollection, kBatteryStrengthUsage, &raw, preparsed,
+                    reinterpret_cast<PCHAR>(report.data()), static_cast<ULONG>(report.size())) != HIDP_STATUS_SUCCESS) continue;
+                if (feature.logicalMaximum <= feature.logicalMinimum) continue;
+                const int64_t value = feature.logicalMinimum < 0 ? static_cast<LONG>(raw) : static_cast<int64_t>(raw);
+                if (value < feature.logicalMinimum || value > feature.logicalMaximum) continue;
+                const double percentValue = feature.logicalMinimum >= 0 && feature.logicalMaximum <= 100
+                    ? static_cast<double>(value)
+                    : (static_cast<double>(value - feature.logicalMinimum) * 100.0)
+                        / static_cast<double>(feature.logicalMaximum - feature.logicalMinimum);
+                const int percent = static_cast<int>(std::lround(percentValue));
+                if (percent < 0 || percent > 100) continue;
+                result = { mouse.key, percent, -1, L"connected" };
+                success = true;
+                break;
+            }
         }
+        if (preparsed) HidD_FreePreparsedData(preparsed);
+        CloseHandle(handle);
+        if (success) return true;
     }
-    if (preparsed) HidD_FreePreparsedData(preparsed);
-    CloseHandle(handle);
-    return success;
+    return false;
 }
 
 DWORD WINAPI BatteryWorker(void* parameter) {
@@ -977,6 +1032,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         g_deviceNotify = RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
         SetTimer(hwnd, TIMER_BATTERY, 1000, nullptr);
         ScanDevices();
+        TrimWorkingSetOnce();
         return 0;
     }
     case WM_DEVICECHANGE:
