@@ -17,6 +17,13 @@
 
 `3554:F510` はPC上で確認したLAMZU 4KレシーバーのID、`3554:F50F` は有線接続中に確認したマウスのIDです。公開資料では同じIDのレシーバーをCompx系と扱う例がありますが、受信機IDだけでは内部のマウスモデルまでは特定できません。このアプリではユーザー指定に従って表示名を「LAMZU Maya」としています。
 
+## Razer wireless mice
+
+- Vendor ID `1532` の電池対応マウスPIDだけを専用プロバイダーに渡します。有線専用 Basilisk V3 35K (`00CB`) と Orochi V2 Bluetooth (`0095`) は含めません。PID表とtransaction IDは、OpenRazerの電池対応リストとHaloBatteryの実装記録を参照しています。
+- HID feature reportはWindowsのreport-ID byteを含む91 byte bufferで、残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求と一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
+- ほとんどの対象PIDはtransaction ID `0x1F`、旧型は `0x3F` または `0xFF` です。PIDごとの優先値を使い、既知の代替値を試します。インターフェイスが見つからない、または応答が一致しない場合は残量を作らず、前回値を最大300秒表示します。
+- Razerのマウス実機が開発PCに無いため、このプロバイダーはコード上の確認のみです。ユーザーのRazer実機で応答と残量値を確認する必要があります。
+
 ## 標準HIDマウス
 
 - 起動時にHIDのGeneric Desktop / Mouse (`0x01:0x02`) を列挙し、WindowsのHID接続・取り外し通知でも再列挙します。
@@ -40,3 +47,5 @@ HID Usage Tables ではマウス入力と Battery System が別のusageとして
 - [HaloBattery LAMZU provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/lamzu.py) — `3554:F510` のCompxコレクション識別とreport-8読み出し例
 - [HidSharp 2.6.4](https://www.nuget.org/packages/HidSharp/2.6.4)
 - [USB-IF HID Usage Tables](https://usb.org/sites/default/files/hut1_5.pdf)
+- [HaloBattery Razer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py) — PID / transaction-ID とFeature reportの参照実装 (MIT、権利表示は [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md))
+- [OpenRazer mouse driver](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c) — 対応PIDの参照元

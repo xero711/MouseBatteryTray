@@ -35,6 +35,13 @@ internal static class MouseDiscovery
                 continue;
             }
 
+            if (RazerMouseProvider.TryCreate(device, out var razerProvider) && razerProvider is not null)
+            {
+                var razerPath = device.DevicePath ?? $"{device.VendorID:X4}:{device.ProductID:X4}";
+                candidates.TryAdd(razerProvider.DeviceId, (razerPath, razerProvider));
+                continue;
+            }
+
             if (!descriptor.DeviceItems.Any(item => item.Usages.GetAllValues().Contains(MouseUsage)))
             {
                 continue;
