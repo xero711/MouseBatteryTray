@@ -16,7 +16,7 @@ Windows の通知領域で、接続中の HID マウスを一覧表示し、対�
 - LAMZU Maya の USB とレシーバー接続
 - Pulsar X2 CrazyLight (USB / 8K receiver) のCompx battery report と、実装済みPIDのVAXEEマウスのfeature report
 - SteelSeries Aerox 3/5/9、Prime/Prime Mini、Rival 3 Wireless/Gen 2、Rival 650 の実装済みPID群
-- Razer の wireless PID 群（Naga、Mamba、Lancehead、Atheris、Orochi V2、Pro Click、Viper、DeathAdder、Basilisk、Cobra など）
+- Razer 専用プロトコルの対応PID群（Naga V3 Pro、Mamba、Lancehead、Atheris、Orochi V2、Pro Click、Viper、DeathAdder、Basilisk V4/V3、Cobra など）
 - マウスのHID Feature reportに標準 Generic Device Controls / Battery Strength usage (`0x06:0x20`) がある機器
 - WindowsがBluetoothの電池残量を公開し、マウスと同じContainer IDに関連付けられる機器
 
@@ -26,7 +26,7 @@ Razer、SteelSeries、Pulsar、VAXEEの専用プロトコルは公開参照に�
 
 ## メモリ
 
-このRelease版を約25秒、250 ms間隔で測定したところ、初期化後のピークはWorking Set 2.20 MB、Private Bytes 2.22 MBでした。初回HID列挙中だけ全体Working Setが一時的に11.23 MBまで上がり、列挙直後のトリム後は2.20 MB以下でした。Private Bytesは全計測を通じて2.22 MB以下です。実行ファイルは210 KiBです。Windowsの共有コードページを含むWorking SetはOSや起動状況で変わります。
+このRelease版を約25秒、250 ms間隔で測定したところ、Private Bytesは最大2.29 MBでした。初回HID列挙中だけ全体Working Setが一時的に11.29 MBまで上がり、起動3秒後以降は最大2.16 MBでした。実行ファイルは211 KiBです。全体Working SetはWindowsの共有コードページや起動状況で変わり、初回列挙中に10 MBを一時的に超える場合があります。
 
 ## ビルド
 

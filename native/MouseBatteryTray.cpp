@@ -256,7 +256,8 @@ bool IsKnownBatteryMouse(USHORT vid, USHORT pid) {
     case 0x00B6: case 0x00B7: case 0x00B8: case 0x00B9: case 0x00BE: case 0x00BF: case 0x00C0:
     case 0x00C1: case 0x00C2: case 0x00C3: case 0x00C4: case 0x00C5: case 0x00C7: case 0x00C8:
     case 0x00CC: case 0x00CD: case 0x00D0: case 0x00D1: case 0x00D3: case 0x00D4: case 0x00D6:
-    case 0x00D7: case 0x00DA: case 0x00DB: case 0x00DE: case 0x00DF: case 0x00E5: case 0x00E6:
+    case 0x00D7: case 0x00DA: case 0x00DB: case 0x00DE: case 0x00DF: case 0x00E0: case 0x00E2:
+    case 0x00E3: case 0x00E5: case 0x00E6: case 0x00E7: case 0x00E8: case 0x00EA: case 0x00EB:
         return true;
     default: return false;
     }
@@ -318,7 +319,11 @@ std::wstring KnownName(USHORT vid, USHORT pid) {
     case 0x00D6: case 0x00D7: return L"Razer Basilisk V3 Pro 35K Phantom Green";
     case 0x00DA: case 0x00DB: return L"Razer Cobra HyperSpeed";
     case 0x00DE: case 0x00DF: return L"Razer Viper V3 Pro SE";
+    case 0x00E0: return L"Razer Orochi V2 receiver";
+    case 0x00E2: case 0x00E3: return L"Razer Basilisk V4 Pro";
     case 0x00E5: case 0x00E6: return L"Razer Viper V4 Pro";
+    case 0x00E7: case 0x00E8: return L"Razer Naga V3 Pro";
+    case 0x00EA: case 0x00EB: return L"Razer Basilisk V4 HyperSpeed";
     default: return L"Razer wireless mouse";
     }
 }
@@ -860,6 +865,7 @@ BYTE RazerTransactionId(USHORT pid) {
 DWORD RazerResponseDelayMs(USHORT pid) {
     switch (pid) {
     case 0x0062: case 0x0094: case 0x0095: return 400;
+    case 0x00E8: return 100;
     case 0x001F: case 0x0024: case 0x0025: case 0x0032: case 0x003E: case 0x003F:
     case 0x0044: case 0x0045: case 0x0059: case 0x005A: case 0x008F: return 1;
     case 0x007A: case 0x007B: case 0x007C: case 0x007D: case 0x009E: case 0x009F:

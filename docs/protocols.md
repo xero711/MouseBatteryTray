@@ -39,13 +39,14 @@
 - VID `3057` のうち、既知のVAXEE receiver PID (`0005`, `1001`, `1002`, `2001`) とmouse PID (`1003`〜`1013`) の `FF05:0001` collectionを対象にします。Feature report ID `0E` で battery command `0B` と charging command `10` を照会し、各応答がcommandをechoした場合だけ採用します。取得は読み取り専用で、polling rateなどの設定は変更しません。Batteryの1 stepを5%として表示します。
 - Report formatは [mousebatt](https://github.com/ryanlewis/mousebatt/blob/main/src/protocol.rs)、PID一覧は[mouse-battery-monitorのVAXEE資料](https://github.com/stuffz/mouse-battery-monitor/blob/main/docs/VAXEE.md)を参照しました。VAXEEマウスがこの開発PCにないため実機検証は未完了です。参照実装のMITライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
-## Razer wireless mice
+## Razer PID support
 
 - Vendor ID `1532` の実装済みPIDだけを専用経路で扱います。有線専用 Basilisk V3 35K (`00CB`) は専用経路に含めていません。Orochi V2 Bluetooth (`0095`) はRazer専用経路と、WindowsがPnPプロパティに残量を公開し、HIDマウスと同じContainer IDで関連付けできる場合のBluetooth経路を試します。
+- 追加PIDとして、Orochi V2 receiver (`00E0`)、Basilisk V4 Pro USB/receiver (`00E2`/`00E3`)、Naga V3 Pro USB/receiver (`00E7`/`00E8`)、Basilisk V4 HyperSpeed USB/receiver (`00EB`/`00EA`) を扱います。Naga V3 Pro receiverには初回応答を約100 ms待つ設定を使います。他の追加PIDは約31 msです。
 - Windowsのreport-ID byteを含む91 byte Feature reportを使います。残量要求はRazer payload `class 0x07 / command 0x80`、充電状態は `0x07 / 0x84` です。応答はtransaction IDとcommand class/idが要求に一致した場合だけ採用し、battery byteを0〜255から0〜100%に換算します。
-- PIDごとの優先transaction IDと応答待ちに加え、代替値を試します。バッテリーを正常に読めたtransaction IDは次回以降に再利用します。読めたことのないIDはスリープ応答だけでは確定せず、誤ったIDを固定しないようにします。AtherisとOrochi V2はモデル固有の長い初回応答待ちを使います。
+- PIDごとの優先transaction IDと応答待ちに加え、代替値を試します。バッテリーを正常に読めたtransaction IDは次回以降に再利用します。読めたことのないIDはスリープ応答だけでは確定せず、誤ったIDを固定しないようにします。Atherisと既存Orochi V2 PID (`0062`/`0094`/`0095`) は約400 ms、Naga V3 Pro receiver (`00E8`) は約100 ms待って初回応答を読みます。
 - 代替transaction IDを探すアプリ側の応答期限は1台あたり約1.5秒です。ドライバーがキャンセルに応答しないと実際の処理が延びることがあります。不応答のFeature要求はその機器の別経路へ進み、他の機器の更新は止めません。
-- PIDとtransaction IDの参照元は [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、追加したPIDとモデル別の応答待ちは[BatteryTrayのRazer provider](https://github.com/qu1ncky/BatteryTray/blob/main/src/providers/razer_peripheral.rs)、対応モデルの確認には[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)を使いました。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
+- PIDの参照元として [HaloBatteryのRazer provider](https://github.com/HeyOkay/HaloBattery/blob/main/providers/razer.py)、[BatteryTrayのRazer provider](https://github.com/qu1ncky/BatteryTray/blob/main/src/providers/razer_peripheral.rs)、[OpenRazerのマウスドライバー](https://github.com/openrazer/driver/blob/master/driver/razermouse_driver.c)と、[Naga V3 Pro](https://github.com/openrazer/openrazer/pull/2904)、[Basilisk V4 HyperSpeed](https://github.com/openrazer/openrazer/pull/2959)、[Basilisk V4 Pro](https://github.com/openrazer/openrazer/pull/2975)、[Orochi V2 receiver](https://github.com/openrazer/openrazer/issues/2856)の公開資料を参照しました（未マージのPRや未解決のissueを含みます）。Razer実機がこの開発PCに無いため、コードはビルド済みですが実機検証は未完了です。参照ライセンスは[第三者ライセンス表示](../THIRD-PARTY-NOTICES.md)に記載しています。
 
 ## 標準HID Battery Strength
 
