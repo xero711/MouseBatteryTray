@@ -13,6 +13,7 @@ Windows の通知領域で、接続中の HID マウスを一覧表示し、対�
 ## バッテリー対応範囲
 
 - Logitech HID++ 2.0対応マウス（G502 X PLUSで確認。他の検出対象モデルはプロトコル上の対応で実機未確認）
+- Logitech Unifying/BoltレシーバーとNano C534でペアリングされたマウス・トラックボールは、レシーバーのHID++ペアリング情報からslotごとに列挙します。
 - LAMZU Maya の USB とレシーバー接続
 - Pulsar X2 CrazyLight (USB / 8K receiver) のCompx battery report と、実装済みPIDのVAXEEマウスのfeature report
 - SteelSeries Aerox 3/5/9、Prime/Prime Mini、Rival 3 Wireless/Gen 2、Rival 650 の実装済みPID群
@@ -22,11 +23,11 @@ Windows の通知領域で、接続中の HID マウスを一覧表示し、対�
 
 一般的な HID マウスも一覧に検出しますが、メーカー独自のバッテリー方式だけを持つ機器では残量を取得できません。Bluetooth機器は、Windowsが電池残量を公開するか、HIDとして公開して上記の読み取り方式に対応する場合に限ります。すべてのマウスから残量を共通方式で取得できる規格はありません。マウス入力レポートだけから残量を推測することもありません。
 
-Razer、SteelSeries、Pulsar、VAXEEの専用プロトコルは公開参照に基づいて実装していますが、このPCに実機がないメーカーは実機確認が未完了です。Windowsが電池を公開しないBluetooth GATT専用機器や、未実装メーカー独自方式には対応できません。Logitech の1台のレシーバーに複数マウスがペアリングされている場合、現在はレシーバー内で応答した最初のスロットを表示します。USB接続とレシーバー接続の両方が個別に見える機種では、同じ物理マウスが2台として表示されることがあります。
+Razer、SteelSeries、Pulsar、VAXEEの専用プロトコルは公開参照に基づいて実装していますが、このPCに実機がないメーカーは実機確認が未完了です。Logitechのレシーバー内の複数slotは個別に列挙しますが、HID++ 1.0のみの機器では残量を取得できません。Windowsが電池を公開しないBluetooth GATT専用機器や、未実装メーカー独自方式には対応できません。USB接続とレシーバー接続の両方が個別に見える機種では、同じ物理マウスが2台として表示されることがあります。
 
 ## メモリ
 
-このRelease版はWindowsにプロセス全体のWorking Setを9 MiB以下に保つハード上限を設定します。約25秒、100 ms間隔の測定では全体Working Setが最大8.99 MB、Private Bytesが最大2.29 MBでした。実行ファイルは211 KiBです。上限を設定できない場合は、従来の初期化後トリムにフォールバックします。
+このRelease版はWindowsにプロセス全体のWorking Setを9 MiB以下に保つハード上限を設定します。前回リリースv0.2.7の約25秒・100 ms間隔の測定ではWorking Setが最大8.99 MB、Private Bytesが最大2.29 MBでした。今回の実行ファイルは約218 KiBです。上限を設定できない場合は、従来の初期化後トリムにフォールバックします。
 
 ## ビルド
 

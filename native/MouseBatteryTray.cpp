@@ -90,6 +90,8 @@ struct MouseDevice {
     std::wstring containerId;
     std::wstring wiredPath;
     std::wstring receiverPath;
+    BYTE receiverSlot = 0;
+    bool receiverOnly = false;
     std::wstring errorPath;
     std::wstring steelSeriesPath;
     DWORD steelSeriesOutputLength = 0;
@@ -141,6 +143,7 @@ std::wstring g_iniPath;
 std::vector<MouseDevice> g_mice;
 std::vector<BatteryWorkerRecord> g_batteryWorkers;
 bool g_shuttingDown = false;
+bool g_receiverScanDeferred = false;
 std::atomic<bool> g_stopRequested{ false };
 HANDLE g_stopEvent{};
 HANDLE g_mutex{};
@@ -396,7 +399,7 @@ void AttachBluetoothBatteryNodes(std::vector<MouseDevice>& mice) {
             const auto containerId = ContainerIdentity(set, info);
             if (containerId.empty() || IsNullContainerId(containerId)) continue;
             const auto mouse = std::find_if(mice.begin(), mice.end(), [&](const MouseDevice& item) {
-                return item.containerId == containerId;
+                return item.receiverSlot == 0 && item.containerId == containerId;
             });
             if (mouse == mice.end()) continue;
             auto instanceId = DeviceInstanceId(set, info);
@@ -443,6 +446,8 @@ bool HasFeatureReportId(PHIDP_PREPARSED_DATA preparsed, const HIDP_CAPS& caps, B
     }
     return false;
 }
+
+void ExpandLogitechReceiverSlots(std::vector<MouseDevice>& mice);
 
 std::vector<MouseDevice> EnumerateMice() {
     std::vector<MouseDevice> result;
@@ -526,7 +531,7 @@ std::vector<MouseDevice> EnumerateMice() {
             && (attributes.ProductID == 0xF50F || attributes.ProductID == 0xF510)
             && caps.UsagePage == 0xFF02 && caps.Usage == 0x0002 && caps.OutputReportByteLength >= 17;
         const bool knownInterface = (attributes.VendorID == 0x1532 && known && razerFeature)
-            || lamzuBattery || steelSeriesBattery || pulsarBattery || vaxeeBattery;
+            || lamzuBattery || steelSeriesBattery || pulsarBattery || vaxeeBattery || logitechBattery;
 
         if (attributes.VendorID == 0x046D && IsLogitechReceiver(attributes.ProductID)
             && caps.UsagePage == 0xFF00 && caps.Usage == 0x0001 && caps.InputReportByteLength == 7) {
@@ -542,6 +547,7 @@ std::vector<MouseDevice> EnumerateMice() {
             mouse.containerId = containerId;
             mouse.name = known ? KnownName(mouse.vendorId, mouse.productId) : productName;
             mouse.key = containerId.empty() ? UsageIdentity(mouse.path) : containerId;
+            mouse.receiverOnly = attributes.VendorID == 0x046D && IsLogitechReceiver(attributes.ProductID) && !genericMouse;
             mouse.mousePaths.push_back(mouse.path);
             mouse.razerFeature = razerFeature;
             if (mouse.name.empty()) mouse.name = productName;
@@ -579,6 +585,7 @@ std::vector<MouseDevice> EnumerateMice() {
             const auto duplicate = std::find_if(result.begin(), result.end(), [&](const MouseDevice& item) { return item.key == mouse.key; });
             if (duplicate == result.end()) result.push_back(std::move(mouse));
             else {
+                if (genericMouse) duplicate->receiverOnly = false;
                 if (std::find(duplicate->mousePaths.begin(), duplicate->mousePaths.end(), mouse.path) == duplicate->mousePaths.end()) {
                     duplicate->mousePaths.push_back(mouse.path);
                 }
@@ -658,6 +665,7 @@ std::vector<MouseDevice> EnumerateMice() {
         });
         if (shortPath != logitechShortPaths.end()) mouse.errorPath = shortPath->second;
     }
+    ExpandLogitechReceiverSlots(result);
     std::sort(result.begin(), result.end(), [](const MouseDevice& a, const MouseDevice& b) {
         const bool aDedicated = IsKnownBatteryMouse(a.vendorId, a.productId)
             || (a.vendorId == 0x046D && (!a.wiredPath.empty() || !a.receiverPath.empty()))
@@ -731,7 +739,14 @@ void UpdateTray() {
 void ScanDevices() {
     auto next = EnumerateMice();
     for (auto& mouse : next) {
-        const auto previous = std::find_if(g_mice.begin(), g_mice.end(), [&](const MouseDevice& item) { return item.key == mouse.key; });
+        auto previous = std::find_if(g_mice.begin(), g_mice.end(), [&](const MouseDevice& item) { return item.key == mouse.key; });
+        if (previous == g_mice.end() && mouse.receiverSlot == 1) {
+            const auto slotMarker = mouse.key.rfind(L"|slot:");
+            if (slotMarker != std::wstring::npos) {
+                const auto receiverKey = mouse.key.substr(0, slotMarker);
+                previous = std::find_if(g_mice.begin(), g_mice.end(), [&](const MouseDevice& item) { return item.key == receiverKey; });
+            }
+        }
         if (previous != g_mice.end()) {
             mouse.percent = previous->percent;
             mouse.charging = previous->charging;
@@ -828,8 +843,11 @@ private:
             CancelIoEx(handle_, &overlapped);
             // Cancellation is asynchronous. Keep both OVERLAPPED and caller buffer
             // alive until the driver has completed the operation.
-            GetOverlappedResult(handle_, &overlapped, &transferred, TRUE);
-            return wait == WAIT_TIMEOUT || (g_stopEvent && wait == WAIT_OBJECT_0 + 1) ? kTimedOut : -1;
+            if (GetOverlappedResult(handle_, &overlapped, &transferred, TRUE)) return static_cast<int>(transferred);
+            const DWORD completionError = GetLastError();
+            const bool cancelledByTimeoutOrStop = wait == WAIT_TIMEOUT
+                || (g_stopEvent && wait == WAIT_OBJECT_0 + 1);
+            return cancelledByTimeoutOrStop && completionError == ERROR_OPERATION_ABORTED ? kTimedOut : -1;
         }
         return GetOverlappedResult(handle_, &overlapped, &transferred, FALSE)
             ? static_cast<int>(transferred) : -1;
@@ -1068,6 +1086,137 @@ bool LogitechIsMouseSlot(HidIo& io, HidIo* shortIo, BYTE slot, bool& unreachable
     return kind.params[0] >= 3 && kind.params[0] <= 5;
 }
 
+bool LogitechReadReceiverPairingInfo(HidIo& io, HidIo* shortIo, BYTE subRegister,
+    BYTE* payload, bool& unreachable) {
+    unreachable = false;
+    BYTE request[7]{};
+    request[0] = 0x10;
+    request[1] = 0xFF;
+    request[2] = 0x83; // HID++ 1.0 GET_LONG_REGISTER
+    request[3] = 0xB5; // Receiver Information
+    request[4] = subRegister;
+    if (io.NativeHandle() != INVALID_HANDLE_VALUE) HidD_FlushQueue(io.NativeHandle());
+    if (shortIo && shortIo->IsOpen()) HidD_FlushQueue(shortIo->NativeHandle());
+    const bool written = shortIo && shortIo->IsOpen() && shortIo->Write(request, sizeof(request), 50);
+    if (!written) {
+        unreachable = true;
+        return false;
+    }
+
+    const ULONGLONG deadline = GetTickCount64() + 80;
+    BYTE longReport[20]{};
+    BYTE shortReport[7]{};
+    while (GetTickCount64() < deadline) {
+        const int length = io.Read(longReport, sizeof(longReport), 12);
+        if (length < 0) { unreachable = true; return false; }
+        if (length >= 20 && longReport[0] == 0x11 && longReport[1] == 0xFF
+            && longReport[2] == 0x83 && longReport[3] == 0xB5 && longReport[4] == subRegister) {
+            memcpy(payload, longReport + 4, 16);
+            return true;
+        }
+        if (length >= 7 && longReport[0] == 0x10 && longReport[1] == 0xFF
+            && longReport[2] == 0x8F && longReport[3] == 0x83
+            && longReport[4] == 0xB5) return false;
+        if (shortIo && shortIo->IsOpen()) {
+            const int shortLength = shortIo->Read(shortReport, sizeof(shortReport), 1);
+            if (shortLength < 0) { unreachable = true; return false; }
+            if (shortLength >= 7 && shortReport[0] == 0x10 && shortReport[1] == 0xFF
+                && shortReport[2] == 0x8F && shortReport[3] == 0x83
+                && shortReport[4] == 0xB5) return false;
+        }
+    }
+    // A silent receiver is not the same as an empty slot. Stop this pass so
+    // a late error for this subregister cannot be confused with the next one.
+    unreachable = true;
+    return false;
+}
+
+void ExpandLogitechReceiverSlots(std::vector<MouseDevice>& mice) {
+    std::vector<MouseDevice> expanded;
+    expanded.reserve(mice.size());
+    for (const auto& mouse : mice) {
+        if (mouse.vendorId != 0x046D || !IsLogitechReceiver(mouse.productId) || mouse.receiverPath.empty()) {
+            expanded.push_back(mouse);
+            continue;
+        }
+
+        const bool receiverBusy = std::any_of(g_batteryWorkers.begin(), g_batteryWorkers.end(), [&](const BatteryWorkerRecord& worker) {
+            return std::find(worker.paths.begin(), worker.paths.end(), mouse.receiverPath) != worker.paths.end();
+        });
+        if (receiverBusy) {
+            g_receiverScanDeferred = true;
+            bool keptPrevious = false;
+            for (const auto& previous : g_mice) {
+                const bool sameReceiver = previous.vendorId == 0x046D && previous.productId == mouse.productId
+                    && (previous.key == mouse.key || previous.key.rfind(mouse.key + L"|slot:", 0) == 0);
+                if (sameReceiver && (previous.receiverSlot > 0 || previous.key == mouse.key)) {
+                    expanded.push_back(previous);
+                    keptPrevious = true;
+                }
+            }
+            if (!keptPrevious && !mouse.receiverOnly) expanded.push_back(mouse);
+            continue;
+        }
+
+        HidIo io(mouse.receiverPath);
+        if (!io.IsOpen()) {
+            if (!mouse.receiverOnly) expanded.push_back(mouse);
+            continue;
+        }
+        HidIo shortIo;
+        if (!mouse.errorPath.empty()) shortIo.Open(mouse.errorPath);
+        std::vector<BYTE> slots;
+        const BYTE maxSlots = mouse.productId == 0xC548 || mouse.productId == 0xC52B || mouse.productId == 0xC532 ? 6
+            : mouse.productId == 0xC534 ? 2 : 1;
+        const bool boltReceiver = mouse.productId == 0xC548;
+        for (BYTE slot = 1; slot <= maxSlots; ++slot) {
+            BYTE info[16]{};
+            bool unreachable = false;
+            const BYTE subRegister = boltReceiver ? static_cast<BYTE>(0x50 + slot)
+                : static_cast<BYTE>(0x20 + slot - 1);
+            if (!LogitechReadReceiverPairingInfo(io, &shortIo, subRegister, info, unreachable)) {
+                if (unreachable) break;
+                continue;
+            }
+            // Solaar's receiver implementations define mouse as kind 2 and
+            // trackball as kind 8 in the pairing-information reply.
+            const BYTE kind = boltReceiver ? static_cast<BYTE>(info[1] & 0x0F)
+                : static_cast<BYTE>(info[7] & 0x0F);
+            if (kind == 2 || kind == 8) slots.push_back(slot);
+        }
+
+        if (slots.empty()) {
+            // Keep the legacy HID++ 2.0 probe when a receiver doesn't expose
+            // pairing information in the standard HID++ 1.0 register.
+            expanded.push_back(mouse);
+            continue;
+        }
+
+        for (const BYTE slot : slots) {
+            MouseDevice logicalMouse = mouse;
+            logicalMouse.key += L"|slot:" + std::to_wstring(slot);
+            if (mouse.productId == 0xC547 && slot == 1) logicalMouse.name = mouse.name;
+            else {
+                logicalMouse.name = (mouse.productId == 0xC548 ? L"Logitech Bolt mouse" : L"Logitech HID++ mouse");
+                logicalMouse.name += L" (slot " + std::to_wstring(slot) + L")";
+            }
+            logicalMouse.path = logicalMouse.receiverPath;
+            logicalMouse.receiverSlot = slot;
+            logicalMouse.wiredPath.clear();
+            logicalMouse.receiverRoute = {};
+            logicalMouse.genericBatteryEndpoints.clear();
+            logicalMouse.bluetoothBatteryNodeIds.clear();
+            logicalMouse.mousePaths.clear();
+            logicalMouse.mousePaths.push_back(logicalMouse.receiverPath);
+            logicalMouse.percent = -1;
+            logicalMouse.charging = -1;
+            logicalMouse.state.clear();
+            expanded.push_back(std::move(logicalMouse));
+        }
+    }
+    mice = std::move(expanded);
+}
+
 int LogitechVoltageToPercent(int millivolts) {
     static constexpr int curve[][2] = {
         { 4186, 100 }, { 4067, 90 }, { 3989, 80 }, { 3922, 70 }, { 3859, 60 },
@@ -1149,11 +1298,11 @@ bool LogitechTryTransport(MouseDevice& mouse, bool receiver, int& percent, int& 
         cache.valid = false;
     }
 
-    const BYTE firstSlot = receiver ? 1 : 0xFF;
-    const BYTE lastSlot = receiver ? 6 : 0xFF;
+    const BYTE firstSlot = receiver ? (mouse.receiverSlot ? mouse.receiverSlot : 1) : 0xFF;
+    const BYTE lastSlot = receiver ? (mouse.receiverSlot ? mouse.receiverSlot : 6) : 0xFF;
     for (BYTE slot = firstSlot; slot <= lastSlot; ++slot) {
         bool unreachable = false;
-        if (receiver && !LogitechIsMouseSlot(longIo, shortHandle, slot, unreachable)) {
+        if (receiver && !mouse.receiverSlot && !LogitechIsMouseSlot(longIo, shortHandle, slot, unreachable)) {
             if (unreachable) break;
             continue;
         }
@@ -1539,6 +1688,7 @@ bool ReapFinishedBatteryWorkers(HWND hwnd) {
 void BeginShutdown(HWND hwnd) {
     if (g_shuttingDown) return;
     g_shuttingDown = true;
+    g_receiverScanDeferred = false;
     g_stopRequested.store(true, std::memory_order_relaxed);
     g_shutdownDeadline = GetTickCount64() + kShutdownTimeoutMs;
     if (g_stopEvent) SetEvent(g_stopEvent);
@@ -1555,6 +1705,20 @@ void BeginShutdown(HWND hwnd) {
     }
     if (g_batteryWorkers.empty()) DestroyWindow(hwnd);
     else SetTimer(hwnd, TIMER_WORKER_REAP, 250, nullptr);
+}
+
+void ScheduleDeferredReceiverScan(HWND hwnd) {
+    if (!g_receiverScanDeferred || g_shuttingDown) return;
+    const bool receiverBusy = std::any_of(g_mice.begin(), g_mice.end(), [&](const MouseDevice& mouse) {
+        if (mouse.vendorId != 0x046D || mouse.receiverPath.empty()) return false;
+        return std::any_of(g_batteryWorkers.begin(), g_batteryWorkers.end(), [&](const BatteryWorkerRecord& worker) {
+            return std::find(worker.paths.begin(), worker.paths.end(), mouse.receiverPath) != worker.paths.end();
+        });
+    });
+    if (receiverBusy) return;
+    g_receiverScanDeferred = false;
+    KillTimer(hwnd, TIMER_DEBOUNCE);
+    SetTimer(hwnd, TIMER_DEBOUNCE, 50, nullptr);
 }
 
 bool StartupEnabled() {
@@ -1774,6 +1938,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_TIMER:
         if (wParam == TIMER_WORKER_REAP) {
             const bool allDone = ReapFinishedBatteryWorkers(hwnd);
+            ScheduleDeferredReceiverScan(hwnd);
             if (!allDone && g_shuttingDown && GetTickCount64() >= g_shutdownDeadline) {
                 // A misbehaving HID driver may ignore cancellation forever. The
                 // user explicitly requested exit, so don't leave an invisible
@@ -1812,6 +1977,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     }
     case WM_BATTERY_WORKER_FINISHED: {
         ReapFinishedBatteryWorkers(hwnd);
+        ScheduleDeferredReceiverScan(hwnd);
         return 0;
     }
     case WM_TRAY:

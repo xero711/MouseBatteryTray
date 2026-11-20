@@ -12,10 +12,11 @@
 
 ## Logitech HID++ 2.0 mice
 
-- Logitech mouse として検出した `046D` HID++ 2.0 interface (`FF00:0002`, 20-byte output report) を対象にします。有線はdevice index `FF`、製品ID `C500`〜`C5FF` のレシーバーはslot 1〜6を確認します。レシーバーではHID++ DeviceName featureのdevice typeを調べ、マウス種別のslotだけを残量問い合わせ対象にします。レシーバーslotのエラー確認にだけ短い `FF00:0001` コレクションを使います。
+- Logitech mouse として検出した `046D` HID++ 2.0 interface (`FF00:0002`, 20-byte output report) を対象にします。有線はdevice index `FF`、レシーバー接続はslotごとに残量を読みます。ペアリング済みのslotはReceiver Information (`B5`) のHID++ 1.0 pairing-info subregisterから調べます。Unifying `C52B/C532`とNano `C534`はsubregister `20`〜、Bolt `C548`は `51`〜を読み、mouseとtrackballだけを表示対象にします。レシーバーslotのエラー確認にだけ短い `FF00:0001` コレクションを使います。
 - Unified Battery `0x1004` を優先し、 Battery Status `0x1000`、その後に Battery Voltage `0x1001` を試します。電圧は3500〜4500mVの単セルLi-ion範囲だけSolaarの放電カーブで百分率換算します。AA/AAAや複数セルを誤換算しないよう範囲外は採用しません。
 - HID++の有効な応答経路をキャッシュして、次回以降の問い合わせを短縮します。
-- G502 X PLUS以外のLogitech機種はこのPCで未検証です。1台のレシーバー内で複数slotが応答する場合、現状は最初のバッテリー応答slotだけを表示します。HID++ 1.0のみの機種は対象外です。
+- G502 X PLUS以外のLogitech機種と複数slot構成はこのPCで未検証です。レシーバー側でpairing-infoを公開しない機種では、従来どおりHID++ 2.0で応答したslotを探すフォールバックを使います。HID++ 1.0のみの機種はスロット種別を判別できても、残量取得には未対応です。
+- Pairing-info subregister、device-kind値、Bolt独自slot情報は[SolaarのReceiver実装](https://github.com/pwr-Solaar/Solaar/blob/master/lib/logitech_receiver/receiver.py#L246-L276)、[HID++ 1.0定数](https://github.com/pwr-Solaar/Solaar/blob/master/lib/logitech_receiver/hidpp10_constants.py#L152-L196)を参照しました。
 
 ## LAMZU Maya
 
@@ -65,7 +66,7 @@
 
 通常のマウス入力だけで電池残量は分かりません。HID Usage TablesにあるBattery Strength usageをすべてのマウスが公開するわけではなく、無線マウスの多くはメーカー独自方式を使います。そのため、HIDマウスを一覧に検出できても、バッテリー対応機種でないと残量は取得できません。Bluetooth機器も、WindowsがPnPプロパティに残量を公開しない場合や、未実装メーカー独自方式の場合は未対応です。
 
-同じマウスがUSB接続とレシーバー接続の両方で別のHID機器として現れると、2項目になる場合があります。Logitechのレシーバーで複数slotを使う場合も、今の版では1台分しか表示できません。
+同じマウスがUSB接続とレシーバー接続の両方で別のHID機器として現れると、2項目になる場合があります。Logitechの実機を使った複数slot検証はまだできていません。
 
 参考:
 
